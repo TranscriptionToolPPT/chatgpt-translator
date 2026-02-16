@@ -211,7 +211,7 @@ async function translateSelection() {
         await Word.run(async (context) => {
             // Get selected range
             const range = context.document.getSelection();
-            range.load('text');
+            range.load('text, font, style, paragraphFormat');
             await context.sync();
             
             const selectedText = range.text;
@@ -220,6 +220,27 @@ async function translateSelection() {
                 showStatus('❌ No text selected. Please select text to translate.', 'error');
                 return;
             }
+            
+            // Save original formatting
+            const originalFont = {
+                name: range.font.name,
+                size: range.font.size,
+                bold: range.font.bold,
+                italic: range.font.italic,
+                underline: range.font.underline,
+                color: range.font.color,
+                highlightColor: range.font.highlightColor
+            };
+            
+            const originalParagraph = {
+                alignment: range.paragraphFormat.alignment,
+                firstLineIndent: range.paragraphFormat.firstLineIndent,
+                leftIndent: range.paragraphFormat.leftIndent,
+                rightIndent: range.paragraphFormat.rightIndent,
+                spaceAfter: range.paragraphFormat.spaceAfter,
+                spaceBefore: range.paragraphFormat.spaceBefore,
+                lineSpacing: range.paragraphFormat.lineSpacing
+            };
             
             // Get language settings
             const sourceLang = document.getElementById('sourceLang').value;
@@ -232,12 +253,31 @@ async function translateSelection() {
             }
             
             // Simple approach: just translate the entire selection as one block
-            // This works for both tables and regular text
             const wordCount = selectedText.trim().split(/\s+/).length;
             const result = await callChatGPT(selectedText, sourceLang, targetLang, apiKey, model);
             
-            // Replace text with translation
+            // Replace text
             range.insertText(result.translation, Word.InsertLocation.replace);
+            await context.sync();
+            
+            // Restore formatting
+            const newRange = context.document.getSelection();
+            newRange.font.name = originalFont.name;
+            newRange.font.size = originalFont.size;
+            newRange.font.bold = originalFont.bold;
+            newRange.font.italic = originalFont.italic;
+            newRange.font.underline = originalFont.underline;
+            newRange.font.color = originalFont.color;
+            newRange.font.highlightColor = originalFont.highlightColor;
+            
+            newRange.paragraphFormat.alignment = originalParagraph.alignment;
+            newRange.paragraphFormat.firstLineIndent = originalParagraph.firstLineIndent;
+            newRange.paragraphFormat.leftIndent = originalParagraph.leftIndent;
+            newRange.paragraphFormat.rightIndent = originalParagraph.rightIndent;
+            newRange.paragraphFormat.spaceAfter = originalParagraph.spaceAfter;
+            newRange.paragraphFormat.spaceBefore = originalParagraph.spaceBefore;
+            newRange.paragraphFormat.lineSpacing = originalParagraph.lineSpacing;
+            
             await context.sync();
             
             // Update usage stats
