@@ -42,6 +42,87 @@ const MODEL_PRICING = {
     'gpt-4o-mini': { input: 0.150, output: 0.600 }  // Fast & economical
 };
 
+// Build system prompt based on translation mode and style
+function buildSystemPrompt(fromLang, toLang, targetLanguage, mode, style) {
+    let basePrompt = '';
+    let styleInstructions = '';
+    
+    // Style instructions
+    if (style === 'strict') {
+        styleInstructions = 'Translate literally and precisely. Maintain exact sentence structure. Use formal terminology.';
+    } else if (style === 'human') {
+        styleInstructions = 'Translate naturally as a native speaker would say it. Prioritize readability and natural flow over literal accuracy.';
+    } else {
+        styleInstructions = 'Balance accuracy with natural language. Keep it professional but readable.';
+    }
+    
+    // Mode-specific prompts
+    switch(mode) {
+        case 'legal':
+            basePrompt = `You are a certified legal translator. Use precise legal terminology. Preserve structure and formatting exactly. Keep all article numbers, dates, names, and IDs unchanged. ${styleInstructions}`;
+            break;
+        case 'certificate':
+            basePrompt = `Translate in official government certificate style. Keep names, numbers, dates, seals, and stamps unchanged. Use formal government language. ${styleInstructions}`;
+            break;
+        case 'bank':
+            basePrompt = `Translate using formal banking and financial terminology. Keep account numbers, amounts, dates, and reference codes unchanged. Use standard banking language. ${styleInstructions}`;
+            break;
+        case 'medical':
+            basePrompt = `Translate medical reports using accurate medical terminology. Keep patient names, dates, test results, and measurements unchanged. Maintain clinical precision. ${styleInstructions}`;
+            break;
+        case 'academic':
+            basePrompt = `Translate academic documents with scholarly terminology. Keep citations, dates, names, and numerical data unchanged. Maintain academic tone. ${styleInstructions}`;
+            break;
+        case 'business':
+            basePrompt = `Translate business contracts and documents using formal business language. Keep company names, dates, amounts, and clause numbers unchanged. ${styleInstructions}`;
+            break;
+        case 'technical':
+            basePrompt = `Translate technical manuals using precise technical terminology. Keep model numbers, specifications, measurements, and codes unchanged. ${styleInstructions}`;
+            break;
+        case 'government':
+            basePrompt = `Translate official government documents using formal administrative language. Keep all reference numbers, dates, names, and official codes unchanged. ${styleInstructions}`;
+            break;
+        case 'casual':
+            basePrompt = `Translate conversationally like a native speaker in everyday language. Make it sound natural and friendly, as if texting or chatting. ${styleInstructions}`;
+            break;
+        default:
+            basePrompt = `You are a professional translator. ${styleInstructions}`;
+    }
+    
+    // Add auto-detect or source language
+    if (fromLang === 'auto') {
+        return `${basePrompt} Detect the source language and translate to ${targetLanguage}. IMPORTANT: Preserve all numbers, dates, IDs, and proper names exactly as they appear. Return ONLY the translated text without any explanations. At the very end, on a new line, write "DETECTED:" followed by the detected language name in English.`;
+    } else {
+        const sourceLanguage = LANGUAGE_MAP[fromLang];
+        return `${basePrompt} Translate from ${sourceLanguage} to ${targetLanguage}. IMPORTANT: Preserve all numbers, dates, IDs, and proper names exactly as they appear. Return ONLY the translated text without any explanations.`;
+    }
+}
+
+// Get appropriate temperature based on mode and style
+function getTemperatureForMode(mode, style) {
+    // Strict modes need lower temperature
+    if (style === 'strict') return 0.1;
+    if (style === 'human') return 0.4;
+    
+    // Mode-based defaults
+    switch(mode) {
+        case 'legal':
+        case 'certificate':
+        case 'bank':
+        case 'medical':
+        case 'government':
+            return 0.1; // Very precise
+        case 'academic':
+        case 'business':
+        case 'technical':
+            return 0.2; // Precise but slightly flexible
+        case 'casual':
+            return 0.4; // More natural
+        default:
+            return 0.3; // Balanced
+    }
+}
+
 // Initialize usage stats
 let usageStats = {
     totalTranslations: 0,
@@ -153,15 +234,14 @@ async function translateSelection() {
 // Call ChatGPT API
 async function callChatGPT(text, fromLang, toLang, apiKey, model) {
     const targetLanguage = LANGUAGE_MAP[toLang];
+    const mode = document.getElementById('translationMode').value;
+    const style = document.getElementById('translationStyle').value;
     
-    // Build prompt based on auto-detect or specific language
-    let systemPrompt;
-    if (fromLang === 'auto') {
-        systemPrompt = `You are a professional translator. Detect the source language and translate to ${targetLanguage}. Return ONLY the translated text without any explanations. At the very end, on a new line, write "DETECTED:" followed by the detected language name in English.`;
-    } else {
-        const sourceLanguage = LANGUAGE_MAP[fromLang];
-        systemPrompt = `You are a professional translator. Translate from ${sourceLanguage} to ${targetLanguage}. Return ONLY the translated text without any explanations.`;
-    }
+    // Build system prompt based on mode and style
+    let systemPrompt = buildSystemPrompt(fromLang, toLang, targetLanguage, mode, style);
+    
+    // Adjust temperature based on mode
+    const temperature = getTemperatureForMode(mode, style);
     
     try {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -182,7 +262,7 @@ async function callChatGPT(text, fromLang, toLang, apiKey, model) {
                         content: text
                     }
                 ],
-                temperature: 0.3,
+                temperature: temperature,
                 max_tokens: 3000
             })
         });
