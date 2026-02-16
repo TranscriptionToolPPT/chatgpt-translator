@@ -47,46 +47,48 @@ function buildSystemPrompt(fromLang, toLang, targetLanguage, mode, style) {
     let basePrompt = '';
     let styleInstructions = '';
     
-    // Style instructions
-    if (style === 'strict') {
-        styleInstructions = 'Translate literally and precisely. Maintain exact sentence structure. Use formal terminology.';
-    } else if (style === 'human') {
-        styleInstructions = 'Translate naturally as a native speaker would say it. Prioritize readability and natural flow over literal accuracy.';
+    // Special handling for casual mode - always natural regardless of style
+    if (mode === 'casual') {
+        basePrompt = `Translate conversationally like a native speaker in everyday language. Make it sound natural and friendly, as if texting or chatting. Use colloquial expressions when appropriate.`;
     } else {
-        styleInstructions = 'Balance accuracy with natural language. Keep it professional but readable.';
-    }
-    
-    // Mode-specific prompts
-    switch(mode) {
-        case 'legal':
-            basePrompt = `You are a certified legal translator. Use precise legal terminology. Preserve structure and formatting exactly. Keep all article numbers, dates, names, and IDs unchanged. ${styleInstructions}`;
-            break;
-        case 'certificate':
-            basePrompt = `Translate in official government certificate style. Keep names, numbers, dates, seals, and stamps unchanged. Use formal government language. ${styleInstructions}`;
-            break;
-        case 'bank':
-            basePrompt = `Translate using formal banking and financial terminology. Keep account numbers, amounts, dates, and reference codes unchanged. Use standard banking language. ${styleInstructions}`;
-            break;
-        case 'medical':
-            basePrompt = `Translate medical reports using accurate medical terminology. Keep patient names, dates, test results, and measurements unchanged. Maintain clinical precision. ${styleInstructions}`;
-            break;
-        case 'academic':
-            basePrompt = `Translate academic documents with scholarly terminology. Keep citations, dates, names, and numerical data unchanged. Maintain academic tone. ${styleInstructions}`;
-            break;
-        case 'business':
-            basePrompt = `Translate business contracts and documents using formal business language. Keep company names, dates, amounts, and clause numbers unchanged. ${styleInstructions}`;
-            break;
-        case 'technical':
-            basePrompt = `Translate technical manuals using precise technical terminology. Keep model numbers, specifications, measurements, and codes unchanged. ${styleInstructions}`;
-            break;
-        case 'government':
-            basePrompt = `Translate official government documents using formal administrative language. Keep all reference numbers, dates, names, and official codes unchanged. ${styleInstructions}`;
-            break;
-        case 'casual':
-            basePrompt = `Translate conversationally like a native speaker in everyday language. Make it sound natural and friendly, as if texting or chatting. ${styleInstructions}`;
-            break;
-        default:
-            basePrompt = `You are a professional translator. ${styleInstructions}`;
+        // Style instructions for non-casual modes
+        if (style === 'strict') {
+            styleInstructions = 'Translate literally and precisely. Maintain exact sentence structure. Use formal terminology.';
+        } else if (style === 'human') {
+            styleInstructions = 'Translate naturally as a native speaker would say it. Prioritize readability and natural flow over literal accuracy.';
+        } else {
+            styleInstructions = 'Balance accuracy with natural language. Keep it professional but readable.';
+        }
+        
+        // Mode-specific prompts
+        switch(mode) {
+            case 'legal':
+                basePrompt = `You are a certified legal translator. Use precise legal terminology. Preserve structure and formatting exactly. Keep all article numbers, dates, names, and IDs unchanged. ${styleInstructions}`;
+                break;
+            case 'certificate':
+                basePrompt = `Translate in official government certificate style. Keep names, numbers, dates, seals, and stamps unchanged. Use formal government language. ${styleInstructions}`;
+                break;
+            case 'bank':
+                basePrompt = `Translate using formal banking and financial terminology. Keep account numbers, amounts, dates, and reference codes unchanged. Use standard banking language. ${styleInstructions}`;
+                break;
+            case 'medical':
+                basePrompt = `Translate medical reports using accurate medical terminology. Keep patient names, dates, test results, and measurements unchanged. Maintain clinical precision. ${styleInstructions}`;
+                break;
+            case 'academic':
+                basePrompt = `Translate academic documents with scholarly terminology. Keep citations, dates, names, and numerical data unchanged. Maintain academic tone. ${styleInstructions}`;
+                break;
+            case 'business':
+                basePrompt = `Translate business contracts and documents using formal business language. Keep company names, dates, amounts, and clause numbers unchanged. ${styleInstructions}`;
+                break;
+            case 'technical':
+                basePrompt = `Translate technical manuals using precise technical terminology. Keep model numbers, specifications, measurements, and codes unchanged. ${styleInstructions}`;
+                break;
+            case 'government':
+                basePrompt = `Translate official government documents using formal administrative language. Keep all reference numbers, dates, names, and official codes unchanged. ${styleInstructions}`;
+                break;
+            default:
+                basePrompt = `You are a professional translator. ${styleInstructions}`;
+        }
     }
     
     // Add auto-detect or source language
@@ -308,16 +310,26 @@ async function callChatGPT(text, fromLang, toLang, apiKey, model) {
 
 // Update usage statistics
 function updateUsageStats(wordCount, usage, model, detectedLanguage) {
+    // Safety check: make sure usage object exists
+    if (!usage) {
+        console.warn('No usage data returned from API');
+        return;
+    }
+    
     usageStats.totalTranslations++;
     usageStats.totalWords += wordCount;
     usageStats.totalInputTokens += usage.prompt_tokens || 0;
     usageStats.totalOutputTokens += usage.completion_tokens || 0;
     
-    // Calculate cost
+    // Calculate cost with safety check for pricing
     const pricing = MODEL_PRICING[model];
-    const inputCost = (usage.prompt_tokens / 1000000) * pricing.input;
-    const outputCost = (usage.completion_tokens / 1000000) * pricing.output;
-    usageStats.totalCost += (inputCost + outputCost);
+    if (pricing) {
+        const inputCost = ((usage.prompt_tokens || 0) / 1000000) * pricing.input;
+        const outputCost = ((usage.completion_tokens || 0) / 1000000) * pricing.output;
+        usageStats.totalCost += (inputCost + outputCost);
+    } else {
+        console.warn(`No pricing data for model: ${model}`);
+    }
     
     // Save to localStorage
     localStorage.setItem('usage_stats', JSON.stringify(usageStats));
