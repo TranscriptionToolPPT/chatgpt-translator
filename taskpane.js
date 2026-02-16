@@ -191,13 +191,15 @@ async function translateSelection() {
         await Word.run(async (context) => {
             // Get selected range
             const range = context.document.getSelection();
-            range.load('text, type, paragraphs, tables');
+            range.load('text');
             await context.sync();
             
-            // Check if selection contains tables
-            const tables = range.tables;
-            tables.load('items');
-            await context.sync();
+            const selectedText = range.text;
+            
+            if (!selectedText || selectedText.trim().length === 0) {
+                showStatus('❌ No text selected. Please select text to translate.', 'error');
+                return;
+            }
             
             // Get language settings
             const sourceLang = document.getElementById('sourceLang').value;
@@ -209,32 +211,36 @@ async function translateSelection() {
                 return;
             }
             
-            // If we have tables in selection
-            if (tables.items.length > 0) {
-                showStatus('⏳ Translating table cells...', 'info');
-                await translateTableCells(context, tables.items, sourceLang, targetLang, apiKey, model);
-            } else {
-                // Regular text translation (original behavior)
-                const selectedText = range.text;
-                
-                if (!selectedText || selectedText.trim().length === 0) {
-                    showStatus('❌ No text selected. Please select text to translate.', 'error');
-                    return;
-                }
-                
-                showStatus('⏳ Translating...', 'info');
-                
-                const wordCount = selectedText.trim().split(/\s+/).length;
-                const result = await callChatGPT(selectedText, sourceLang, targetLang, apiKey, model);
-                
-                range.insertText(result.translation, Word.InsertLocation.replace);
+            // Try to detect if we're in a table by getting parent paragraph
+            try {
+                const parentParagraph = range.paragraphs.getFirst();
+                parentParagraph.load('parentTableCell');
                 await context.sync();
                 
-                updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
-                
-                const detectedMsg = result.detectedLanguage ? ` (Detected: ${result.detectedLanguage})` : '';
-                showStatus(`✅ Translation completed!${detectedMsg}`, 'success');
+                // If we have a parent table cell, we're in a table
+                if (parentParagraph.parentTableCell && !parentParagraph.parentTableCell.isNullObject) {
+                    showStatus('⏳ Translating table cells...', 'info');
+                    await translateTableSelection(context, range, sourceLang, targetLang, apiKey, model);
+                    return;
+                }
+            } catch (e) {
+                // Not in a table, continue with regular translation
+                console.log('Not in a table, using regular translation');
             }
+            
+            // Regular text translation
+            showStatus('⏳ Translating...', 'info');
+            
+            const wordCount = selectedText.trim().split(/\s+/).length;
+            const result = await callChatGPT(selectedText, sourceLang, targetLang, apiKey, model);
+            
+            range.insertText(result.translation, Word.InsertLocation.replace);
+            await context.sync();
+            
+            updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
+            
+            const detectedMsg = result.detectedLanguage ? ` (Detected: ${result.detectedLanguage})` : '';
+            showStatus(`✅ Translation completed!${detectedMsg}`, 'success');
         });
     } catch (error) {
         console.error('Translation error:', error);
@@ -242,79 +248,84 @@ async function translateSelection() {
     }
 }
 
-// Translate table cells
-async function translateTableCells(context, tables, sourceLang, targetLang, apiKey, model) {
-    let totalCells = 0;
+// Translate table selection (cells within selection)
+async function translateTableSelection(context, range, sourceLang, targetLang, apiKey, model) {
     let translatedCells = 0;
     let totalWords = 0;
     let totalUsage = { prompt_tokens: 0, completion_tokens: 0 };
     
     try {
-        // Process each table
-        for (const table of tables) {
-            table.load('rowCount, rows');
+        // Get all paragraphs in selection
+        const paragraphs = range.paragraphs;
+        paragraphs.load('items');
+        await context.sync();
+        
+        const cellsToTranslate = [];
+        
+        // Find all unique table cells in selection
+        for (const para of paragraphs.items) {
+            para.load('parentTableCell');
             await context.sync();
             
-            const rows = table.rows;
-            rows.load('items');
-            await context.sync();
-            
-            // Process each row
-            for (const row of rows.items) {
-                row.load('cells');
+            if (para.parentTableCell && !para.parentTableCell.isNullObject) {
+                // Check if we already have this cell
+                const cellBody = para.parentTableCell.body;
+                cellBody.load('text');
                 await context.sync();
                 
-                const cells = row.cells;
-                cells.load('items');
-                await context.sync();
-                
-                // Process each cell
-                for (const cell of cells.items) {
-                    cell.load('body');
-                    await context.sync();
-                    
-                    const cellBody = cell.body;
-                    cellBody.load('text');
-                    await context.sync();
-                    
-                    const cellText = cellBody.text.trim();
-                    
-                    // Skip empty cells
-                    if (!cellText || cellText.length === 0) {
-                        continue;
-                    }
-                    
-                    totalCells++;
-                    
-                    // Update status every 10 cells
-                    if (totalCells % 10 === 0) {
-                        showStatus(`⏳ Translating cell ${totalCells}...`, 'info');
-                    }
-                    
-                    try {
-                        // Translate the cell
-                        const wordCount = cellText.split(/\s+/).length;
-                        const result = await callChatGPT(cellText, sourceLang, targetLang, apiKey, model);
-                        
-                        // Replace cell content
-                        cellBody.clear();
-                        cellBody.insertText(result.translation, Word.InsertLocation.start);
-                        await context.sync();
-                        
-                        translatedCells++;
-                        totalWords += wordCount;
-                        
-                        // Accumulate usage stats
-                        if (result.usage) {
-                            totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
-                            totalUsage.completion_tokens += result.usage.completion_tokens || 0;
-                        }
-                        
-                    } catch (cellError) {
-                        console.error(`Error translating cell:`, cellError);
-                        // Continue with next cell even if one fails
-                    }
+                // Avoid duplicates
+                if (!cellsToTranslate.find(c => c.text === cellBody.text)) {
+                    cellsToTranslate.push({
+                        body: cellBody,
+                        text: cellBody.text.trim()
+                    });
                 }
+            }
+        }
+        
+        if (cellsToTranslate.length === 0) {
+            showStatus('❌ No table cells found in selection', 'error');
+            return;
+        }
+        
+        showStatus(`⏳ Found ${cellsToTranslate.length} cells. Starting translation...`, 'info');
+        
+        // Translate each unique cell
+        for (let i = 0; i < cellsToTranslate.length; i++) {
+            const cell = cellsToTranslate[i];
+            
+            // Skip empty cells
+            if (!cell.text || cell.text.length === 0) {
+                continue;
+            }
+            
+            // Update status every 5 cells
+            if ((i + 1) % 5 === 0) {
+                showStatus(`⏳ Translating cell ${i + 1}/${cellsToTranslate.length}...`, 'info');
+            }
+            
+            try {
+                // Translate the cell
+                const wordCount = cell.text.split(/\s+/).length;
+                const result = await callChatGPT(cell.text, sourceLang, targetLang, apiKey, model);
+                
+                // Replace cell content
+                cell.body.clear();
+                cell.body.insertText(result.translation, Word.InsertLocation.start);
+                await context.sync();
+                
+                translatedCells++;
+                totalWords += wordCount;
+                
+                // Accumulate usage stats
+                if (result.usage) {
+                    totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
+                    totalUsage.completion_tokens += result.usage.completion_tokens || 0;
+                }
+                
+            } catch (cellError) {
+                console.error(`Error translating cell ${i + 1}:`, cellError);
+                // Continue with next cell
             }
         }
         
@@ -325,7 +336,7 @@ async function translateTableCells(context, tables, sourceLang, targetLang, apiK
         
     } catch (error) {
         console.error('Table translation error:', error);
-        showStatus(`❌ Error: Translated ${translatedCells}/${totalCells} cells. ${error.message}`, 'error');
+        showStatus(`❌ Error: Translated ${translatedCells} cells. ${error.message}`, 'error');
     }
 }
 
