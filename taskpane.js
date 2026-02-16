@@ -93,10 +93,30 @@ function buildSystemPrompt(fromLang, toLang, targetLanguage, mode, style) {
     
     // Add auto-detect or source language
     if (fromLang === 'auto') {
-        return `${basePrompt} Detect the source language and translate to ${targetLanguage}. IMPORTANT: Preserve all numbers, dates, IDs, and proper names exactly as they appear. Return ONLY the translated text without any explanations. At the very end, on a new line, write "DETECTED:" followed by the detected language name in English.`;
+        return `${basePrompt} Detect the source language and translate to ${targetLanguage}. 
+
+CRITICAL FORMATTING RULES:
+- Preserve the EXACT formatting, structure, and layout of the original text
+- Do NOT add any numbering, bullets, or formatting that doesn't exist in the original
+- If the original has numbering (1., 2., 3.), keep it exactly as is
+- If the original has NO numbering, do NOT add any
+- Maintain all line breaks, spacing, and indentation exactly as in the source
+- IMPORTANT: Preserve all numbers, dates, IDs, and proper names exactly as they appear
+
+Return ONLY the translated text without any explanations. At the very end, on a new line, write "DETECTED:" followed by the detected language name in English.`;
     } else {
         const sourceLanguage = LANGUAGE_MAP[fromLang];
-        return `${basePrompt} Translate from ${sourceLanguage} to ${targetLanguage}. IMPORTANT: Preserve all numbers, dates, IDs, and proper names exactly as they appear. Return ONLY the translated text without any explanations.`;
+        return `${basePrompt} Translate from ${sourceLanguage} to ${targetLanguage}. 
+
+CRITICAL FORMATTING RULES:
+- Preserve the EXACT formatting, structure, and layout of the original text
+- Do NOT add any numbering, bullets, or formatting that doesn't exist in the original
+- If the original has numbering (1., 2., 3.), keep it exactly as is
+- If the original has NO numbering, do NOT add any
+- Maintain all line breaks, spacing, and indentation exactly as in the source
+- IMPORTANT: Preserve all numbers, dates, IDs, and proper names exactly as they appear
+
+Return ONLY the translated text without any explanations.`;
     }
 }
 
