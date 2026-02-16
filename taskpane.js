@@ -1,52 +1,112 @@
 /* global Word, Office */
 
-// تهيئة Office.js
+// Language mappings
+const LANGUAGE_MAP = {
+    'auto': 'Auto-detect',
+    'en': 'English',
+    'ar': 'Arabic',
+    'es': 'Spanish',
+    'fr': 'French',
+    'de': 'German',
+    'it': 'Italian',
+    'pt': 'Portuguese',
+    'ru': 'Russian',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'zh': 'Chinese (Simplified)',
+    'zh-TW': 'Chinese (Traditional)',
+    'hi': 'Hindi',
+    'tr': 'Turkish',
+    'nl': 'Dutch',
+    'pl': 'Polish',
+    'sv': 'Swedish',
+    'da': 'Danish',
+    'no': 'Norwegian',
+    'fi': 'Finnish',
+    'el': 'Greek',
+    'he': 'Hebrew',
+    'th': 'Thai',
+    'vi': 'Vietnamese',
+    'id': 'Indonesian',
+    'ms': 'Malay',
+    'cs': 'Czech',
+    'hu': 'Hungarian',
+    'ro': 'Romanian',
+    'uk': 'Ukrainian'
+};
+
+// Model pricing (per 1M tokens)
+const MODEL_PRICING = {
+    'gpt-4.1': { input: 3.00, output: 12.00 },      // Main office model
+    'gpt-5.2': { input: 20.00, output: 80.00 },     // Premium for complex files (estimated)
+    'gpt-4o-mini': { input: 0.150, output: 0.600 }  // Fast & economical
+};
+
+// Initialize usage stats
+let usageStats = {
+    totalTranslations: 0,
+    totalWords: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCost: 0
+};
+
+// Initialize Office.js
 Office.onReady((info) => {
     if (info.host === Office.HostType.Word) {
-        console.log("✅ ChatGPT Translator جاهز للعمل!");
+        console.log("✅ ChatGPT Translator Ready!");
         
-        // التحقق من وجود API Key محفوظ
+        // Load saved API Key
         const savedKey = localStorage.getItem('openai_api_key');
         if (savedKey) {
             document.getElementById('apiKey').value = savedKey;
             document.getElementById('apiKeySaved').style.display = 'inline-block';
         }
+        
+        // Load usage stats
+        loadUsageStats();
+        
+        // Update model display
+        updateCurrentModel();
+        
+        // Listen for model changes
+        document.getElementById('modelSelect').addEventListener('change', updateCurrentModel);
     }
 });
 
-// حفظ الـ API Key
+// Save API Key
 function saveApiKey() {
     const apiKey = document.getElementById('apiKey').value.trim();
     
     if (!apiKey) {
-        showStatus('❌ من فضلك أدخل API Key', 'error');
+        showStatus('❌ Please enter an API Key', 'error');
         return;
     }
     
     if (!apiKey.startsWith('sk-')) {
-        showStatus('❌ المفتاح غير صحيح. يجب أن يبدأ بـ sk-', 'error');
+        showStatus('❌ Invalid API Key. Must start with sk-', 'error');
         return;
     }
     
     localStorage.setItem('openai_api_key', apiKey);
     document.getElementById('apiKeySaved').style.display = 'inline-block';
-    showStatus('✅ تم حفظ المفتاح بنجاح', 'success');
+    showStatus('✅ API Key saved successfully', 'success');
 }
 
-// الترجمة الرئيسية
+// Main translation function
 async function translateSelection() {
     const apiKey = localStorage.getItem('openai_api_key');
     
     if (!apiKey) {
-        showStatus('❌ من فضلك أدخل وحفظ API Key أولاً', 'error');
+        showStatus('❌ Please enter and save your API Key first', 'error');
         return;
     }
     
-    showStatus('⏳ جاري الترجمة...', 'info');
+    showStatus('⏳ Translating...', 'info');
     
     try {
         await Word.run(async (context) => {
-            // الحصول على النص المحدد
+            // Get selected text
             const range = context.document.getSelection();
             range.load('text, font');
             await context.sync();
@@ -54,49 +114,54 @@ async function translateSelection() {
             const selectedText = range.text;
             
             if (!selectedText || selectedText.trim().length === 0) {
-                showStatus('❌ لم يتم تحديد أي نص. حدد النص المراد ترجمته.', 'error');
+                showStatus('❌ No text selected. Please select text to translate.', 'error');
                 return;
             }
             
-            // الحصول على اللغات المختارة
+            // Get language settings
             const sourceLang = document.getElementById('sourceLang').value;
             const targetLang = document.getElementById('targetLang').value;
+            const model = document.getElementById('modelSelect').value;
             
-            if (sourceLang === targetLang) {
-                showStatus('⚠️ اللغة المصدر والهدف متطابقتان', 'error');
+            if (sourceLang === targetLang && sourceLang !== 'auto') {
+                showStatus('⚠️ Source and target languages are the same', 'error');
                 return;
             }
             
-            // استدعاء ChatGPT API
-            const translation = await callChatGPT(selectedText, sourceLang, targetLang, apiKey);
+            // Count words
+            const wordCount = selectedText.trim().split(/\s+/).length;
             
-            // استبدال النص بالترجمة (مع الحفاظ على التنسيق)
-            range.insertText(translation, Word.InsertLocation.replace);
+            // Call ChatGPT API
+            const result = await callChatGPT(selectedText, sourceLang, targetLang, apiKey, model);
             
+            // Replace text with translation
+            range.insertText(result.translation, Word.InsertLocation.replace);
             await context.sync();
             
-            showStatus('✅ تمت الترجمة بنجاح!', 'success');
+            // Update usage stats
+            updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
+            
+            const detectedMsg = result.detectedLanguage ? ` (Detected: ${result.detectedLanguage})` : '';
+            showStatus(`✅ Translation completed!${detectedMsg}`, 'success');
         });
     } catch (error) {
         console.error('Translation error:', error);
-        showStatus(`❌ حدث خطأ: ${error.message}`, 'error');
+        showStatus(`❌ Error: ${error.message}`, 'error');
     }
 }
 
-// استدعاء ChatGPT API
-async function callChatGPT(text, fromLang, toLang, apiKey) {
-    // خريطة اللغات
-    const langMap = {
-        'es': 'Spanish',
-        'en': 'English',
-        'fr': 'French',
-        'de': 'German',
-        'it': 'Italian',
-        'ar': 'Arabic'
-    };
+// Call ChatGPT API
+async function callChatGPT(text, fromLang, toLang, apiKey, model) {
+    const targetLanguage = LANGUAGE_MAP[toLang];
     
-    const sourceLanguage = langMap[fromLang];
-    const targetLanguage = langMap[toLang];
+    // Build prompt based on auto-detect or specific language
+    let systemPrompt;
+    if (fromLang === 'auto') {
+        systemPrompt = `You are a professional translator. Detect the source language and translate to ${targetLanguage}. Return ONLY the translated text without any explanations. At the very end, on a new line, write "DETECTED:" followed by the detected language name in English.`;
+    } else {
+        const sourceLanguage = LANGUAGE_MAP[fromLang];
+        systemPrompt = `You are a professional translator. Translate from ${sourceLanguage} to ${targetLanguage}. Return ONLY the translated text without any explanations.`;
+    }
     
     try {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -106,19 +171,19 @@ async function callChatGPT(text, fromLang, toLang, apiKey) {
                 'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-                model: 'gpt-4o-mini', // أرخص وأسرع موديل
+                model: model,
                 messages: [
                     {
                         role: 'system',
-                        content: `You are a professional translator. Translate the following text from ${sourceLanguage} to ${targetLanguage}. Return ONLY the translated text without any explanations, notes, or additional commentary.`
+                        content: systemPrompt
                     },
                     {
                         role: 'user',
                         content: text
                     }
                 ],
-                temperature: 0.3, // دقة أعلى
-                max_tokens: 2000
+                temperature: 0.3,
+                max_tokens: 3000
             })
         });
         
@@ -130,31 +195,105 @@ async function callChatGPT(text, fromLang, toLang, apiKey) {
         const data = await response.json();
         
         if (!data.choices || !data.choices[0]) {
-            throw new Error('استجابة غير متوقعة من API');
+            throw new Error('Unexpected API response');
         }
         
-        return data.choices[0].message.content.trim();
+        let translation = data.choices[0].message.content.trim();
+        let detectedLanguage = null;
+        
+        // Extract detected language if auto-detect was used
+        if (fromLang === 'auto' && translation.includes('DETECTED:')) {
+            const parts = translation.split('DETECTED:');
+            translation = parts[0].trim();
+            detectedLanguage = parts[1].trim();
+        }
+        
+        return {
+            translation: translation,
+            usage: data.usage,
+            detectedLanguage: detectedLanguage
+        };
         
     } catch (error) {
         if (error.message.includes('fetch')) {
-            throw new Error('فشل الاتصال بـ ChatGPT. تحقق من الإنترنت.');
+            throw new Error('Failed to connect to ChatGPT. Check your internet.');
         } else if (error.message.includes('Incorrect API key')) {
-            throw new Error('API Key غير صحيح. تحقق من المفتاح.');
-        } else if (error.message.includes('quota')) {
-            throw new Error('نفذ رصيد API. أضف رصيد لحسابك على OpenAI.');
+            throw new Error('Invalid API Key. Please check your key.');
+        } else if (error.message.includes('quota') || error.message.includes('insufficient_quota')) {
+            throw new Error('API quota exceeded. Add credits to your OpenAI account.');
         }
         throw error;
     }
 }
 
-// عرض رسائل الحالة
+// Update usage statistics
+function updateUsageStats(wordCount, usage, model, detectedLanguage) {
+    usageStats.totalTranslations++;
+    usageStats.totalWords += wordCount;
+    usageStats.totalInputTokens += usage.prompt_tokens || 0;
+    usageStats.totalOutputTokens += usage.completion_tokens || 0;
+    
+    // Calculate cost
+    const pricing = MODEL_PRICING[model];
+    const inputCost = (usage.prompt_tokens / 1000000) * pricing.input;
+    const outputCost = (usage.completion_tokens / 1000000) * pricing.output;
+    usageStats.totalCost += (inputCost + outputCost);
+    
+    // Save to localStorage
+    localStorage.setItem('usage_stats', JSON.stringify(usageStats));
+    
+    // Update display
+    displayUsageStats();
+}
+
+// Load usage statistics
+function loadUsageStats() {
+    const saved = localStorage.getItem('usage_stats');
+    if (saved) {
+        usageStats = JSON.parse(saved);
+    }
+    displayUsageStats();
+}
+
+// Display usage statistics
+function displayUsageStats() {
+    document.getElementById('totalTranslations').textContent = usageStats.totalTranslations.toLocaleString();
+    document.getElementById('totalWords').textContent = usageStats.totalWords.toLocaleString();
+    document.getElementById('totalInputTokens').textContent = usageStats.totalInputTokens.toLocaleString();
+    document.getElementById('totalOutputTokens').textContent = usageStats.totalOutputTokens.toLocaleString();
+    document.getElementById('totalCost').textContent = `$${usageStats.totalCost.toFixed(4)}`;
+}
+
+// Update current model display
+function updateCurrentModel() {
+    const model = document.getElementById('modelSelect').value;
+    document.getElementById('currentModel').textContent = model;
+}
+
+// Reset statistics
+function resetStats() {
+    if (confirm('Are you sure you want to reset all usage statistics?')) {
+        usageStats = {
+            totalTranslations: 0,
+            totalWords: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCost: 0
+        };
+        localStorage.setItem('usage_stats', JSON.stringify(usageStats));
+        displayUsageStats();
+        showStatus('✅ Statistics reset successfully', 'success');
+    }
+}
+
+// Show status messages
 function showStatus(message, type) {
     const statusDiv = document.getElementById('status');
     statusDiv.textContent = message;
     statusDiv.className = `status ${type}`;
     statusDiv.style.display = 'block';
     
-    // إخفاء الرسالة تلقائياً بعد 5 ثواني للرسائل الناجحة
+    // Auto-hide success messages
     if (type === 'success') {
         setTimeout(() => {
             statusDiv.style.display = 'none';
