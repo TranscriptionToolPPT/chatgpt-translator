@@ -211,7 +211,7 @@ async function translateSelection() {
         await Word.run(async (context) => {
             // Get selected range
             const range = context.document.getSelection();
-            range.load('text, font, style, paragraphFormat');
+            range.load('text, paragraphs');
             await context.sync();
             
             const selectedText = range.text;
@@ -220,27 +220,6 @@ async function translateSelection() {
                 showStatus('❌ No text selected. Please select text to translate.', 'error');
                 return;
             }
-            
-            // Save original formatting
-            const originalFont = {
-                name: range.font.name,
-                size: range.font.size,
-                bold: range.font.bold,
-                italic: range.font.italic,
-                underline: range.font.underline,
-                color: range.font.color,
-                highlightColor: range.font.highlightColor
-            };
-            
-            const originalParagraph = {
-                alignment: range.paragraphFormat.alignment,
-                firstLineIndent: range.paragraphFormat.firstLineIndent,
-                leftIndent: range.paragraphFormat.leftIndent,
-                rightIndent: range.paragraphFormat.rightIndent,
-                spaceAfter: range.paragraphFormat.spaceAfter,
-                spaceBefore: range.paragraphFormat.spaceBefore,
-                lineSpacing: range.paragraphFormat.lineSpacing
-            };
             
             // Get language settings
             const sourceLang = document.getElementById('sourceLang').value;
@@ -252,40 +231,145 @@ async function translateSelection() {
                 return;
             }
             
-            // Simple approach: just translate the entire selection as one block
-            const wordCount = selectedText.trim().split(/\s+/).length;
-            const result = await callChatGPT(selectedText, sourceLang, targetLang, apiKey, model);
-            
-            // Replace text
-            range.insertText(result.translation, Word.InsertLocation.replace);
+            // Get all paragraphs in selection
+            const paragraphs = range.paragraphs;
+            paragraphs.load('items');
             await context.sync();
             
-            // Restore formatting
-            const newRange = context.document.getSelection();
-            newRange.font.name = originalFont.name;
-            newRange.font.size = originalFont.size;
-            newRange.font.bold = originalFont.bold;
-            newRange.font.italic = originalFont.italic;
-            newRange.font.underline = originalFont.underline;
-            newRange.font.color = originalFont.color;
-            newRange.font.highlightColor = originalFont.highlightColor;
-            
-            newRange.paragraphFormat.alignment = originalParagraph.alignment;
-            newRange.paragraphFormat.firstLineIndent = originalParagraph.firstLineIndent;
-            newRange.paragraphFormat.leftIndent = originalParagraph.leftIndent;
-            newRange.paragraphFormat.rightIndent = originalParagraph.rightIndent;
-            newRange.paragraphFormat.spaceAfter = originalParagraph.spaceAfter;
-            newRange.paragraphFormat.spaceBefore = originalParagraph.spaceBefore;
-            newRange.paragraphFormat.lineSpacing = originalParagraph.lineSpacing;
-            
-            await context.sync();
-            
-            // Update usage stats
-            updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
-            
-            const detectedMsg = result.detectedLanguage ? ` (Detected: ${result.detectedLanguage})` : '';
-            showStatus(`✅ Translation completed!${detectedMsg}`, 'success');
+            // If only one paragraph, translate normally
+            if (paragraphs.items.length === 1) {
+                await translateSingleParagraph(context, paragraphs.items[0], sourceLang, targetLang, apiKey, model);
+            } else {
+                // Multiple paragraphs - translate each separately to preserve formatting
+                await translateMultipleParagraphs(context, paragraphs.items, sourceLang, targetLang, apiKey, model);
+            }
         });
+    } catch (error) {
+        console.error('Translation error:', error);
+        showStatus(`❌ Error: ${error.message}`, 'error');
+    }
+}
+
+// Translate a single paragraph
+async function translateSingleParagraph(context, paragraph, sourceLang, targetLang, apiKey, model) {
+    paragraph.load('text, font, style');
+    await context.sync();
+    
+    const text = paragraph.text.trim();
+    
+    if (!text || text.length === 0) {
+        showStatus('✅ Translation completed!', 'success');
+        return;
+    }
+    
+    // Save original formatting (with safety checks)
+    const originalFont = {
+        name: paragraph.font.name || 'Calibri',
+        size: paragraph.font.size || 11,
+        bold: paragraph.font.bold || false,
+        italic: paragraph.font.italic || false,
+        underline: paragraph.font.underline || 'None',
+        color: paragraph.font.color || '#000000'
+    };
+    
+    const wordCount = text.split(/\s+/).length;
+    const result = await callChatGPT(text, sourceLang, targetLang, apiKey, model);
+    
+    // Clear and insert new text
+    paragraph.clear();
+    paragraph.insertText(result.translation, Word.InsertLocation.start);
+    await context.sync();
+    
+    // Restore formatting
+    paragraph.font.name = originalFont.name;
+    paragraph.font.size = originalFont.size;
+    paragraph.font.bold = originalFont.bold;
+    paragraph.font.italic = originalFont.italic;
+    paragraph.font.underline = originalFont.underline;
+    paragraph.font.color = originalFont.color;
+    
+    await context.sync();
+    
+    updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
+    
+    const detectedMsg = result.detectedLanguage ? ` (Detected: ${result.detectedLanguage})` : '';
+    showStatus(`✅ Translation completed!${detectedMsg}`, 'success');
+}
+
+// Translate multiple paragraphs while preserving individual formatting
+async function translateMultipleParagraphs(context, paragraphs, sourceLang, targetLang, apiKey, model) {
+    let totalWords = 0;
+    let totalUsage = { prompt_tokens: 0, completion_tokens: 0 };
+    let translatedCount = 0;
+    
+    // Collect all text first
+    const paragraphsData = [];
+    
+    for (const para of paragraphs) {
+        para.load('text, font, style');
+        await context.sync();
+        
+        const text = para.text.trim();
+        
+        if (text && text.length > 0) {
+            paragraphsData.push({
+                paragraph: para,
+                text: text,
+                font: {
+                    name: para.font.name || 'Calibri',
+                    size: para.font.size || 11,
+                    bold: para.font.bold || false,
+                    italic: para.font.italic || false,
+                    underline: para.font.underline || 'None',
+                    color: para.font.color || '#000000'
+                }
+            });
+        }
+    }
+    
+    if (paragraphsData.length === 0) {
+        showStatus('❌ No text to translate', 'error');
+        return;
+    }
+    
+    showStatus(`⏳ Translating ${paragraphsData.length} paragraphs...`, 'info');
+    
+    // Translate all paragraphs at once
+    const allText = paragraphsData.map(p => p.text).join('\n\n');
+    const wordCount = allText.split(/\s+/).length;
+    
+    try {
+        const result = await callChatGPT(allText, sourceLang, targetLang, apiKey, model);
+        
+        // Split translation back into paragraphs
+        const translations = result.translation.split('\n\n').filter(t => t.trim());
+        
+        // Apply translations back to paragraphs
+        for (let i = 0; i < paragraphsData.length && i < translations.length; i++) {
+            const data = paragraphsData[i];
+            
+            // Clear and insert translated text
+            data.paragraph.clear();
+            data.paragraph.insertText(translations[i], Word.InsertLocation.start);
+            await context.sync();
+            
+            // Restore original formatting for this specific paragraph
+            data.paragraph.font.name = data.font.name;
+            data.paragraph.font.size = data.font.size;
+            data.paragraph.font.bold = data.font.bold;
+            data.paragraph.font.italic = data.font.italic;
+            data.paragraph.font.underline = data.font.underline;
+            data.paragraph.font.color = data.font.color;
+            
+            await context.sync();
+            
+            translatedCount++;
+        }
+        
+        updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
+        
+        showStatus(`✅ Translated ${translatedCount} paragraphs successfully!`, 'success');
+        
     } catch (error) {
         console.error('Translation error:', error);
         showStatus(`❌ Error: ${error.message}`, 'error');
