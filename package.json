@@ -1,0 +1,17 @@
+{
+  "name": "chatgpt-translator",
+  "version": "1.0.0",
+  "description": "Word Add-in for translating text using ChatGPT",
+  "main": "index.js",
+  "scripts": {
+    "start": "office-addin-debugging start manifest.xml desktop",
+    "stop": "office-addin-debugging stop manifest.xml",
+    "validate": "office-addin-manifest validate manifest.xml"
+  },
+  "keywords": ["office-add-in", "word", "translation", "chatgpt"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "office-addin-debugging": "^5.0.0"
+  }
+}
