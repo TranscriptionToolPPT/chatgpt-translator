@@ -37,9 +37,11 @@ const LANGUAGE_MAP = {
 
 // Model pricing (per 1M tokens)
 const MODEL_PRICING = {
-    'gpt-4.1': { input: 3.00, output: 12.00 },      // Main office model
-    'gpt-5.2': { input: 20.00, output: 80.00 },     // Premium for complex files (estimated)
-    'gpt-4o-mini': { input: 0.150, output: 0.600 }  // Fast & economical
+    'gpt-4o-mini': { input: 0.150, output: 0.600 },
+    'gpt-4o': { input: 2.50, output: 10.00 },
+    'gpt-4-turbo': { input: 10.00, output: 30.00 },
+    'o1-mini': { input: 3.00, output: 12.00 },
+    'o1': { input: 15.00, output: 60.00 }
 };
 
 // Build system prompt based on translation mode and style
@@ -388,6 +390,28 @@ async function callChatGPT(text, fromLang, toLang, apiKey, model) {
     // Adjust temperature based on mode
     const temperature = getTemperatureForMode(mode, style);
     
+    // Use max_completion_tokens for newer models (gpt-5.2, o1), max_tokens for older ones
+    const isNewerModel = model.includes('gpt-5') || model.includes('o1');
+    const tokenParam = isNewerModel ? 'max_completion_tokens' : 'max_tokens';
+    
+    const requestBody = {
+        model: model,
+        messages: [
+            {
+                role: 'system',
+                content: systemPrompt
+            },
+            {
+                role: 'user',
+                content: text
+            }
+        ],
+        temperature: temperature
+    };
+    
+    // Add the appropriate token parameter
+    requestBody[tokenParam] = 3000;
+    
     try {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
@@ -395,21 +419,7 @@ async function callChatGPT(text, fromLang, toLang, apiKey, model) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${apiKey}`
             },
-            body: JSON.stringify({
-                model: model,
-                messages: [
-                    {
-                        role: 'system',
-                        content: systemPrompt
-                    },
-                    {
-                        role: 'user',
-                        content: text
-                    }
-                ],
-                temperature: temperature,
-                max_tokens: 3000
-            })
+            body: JSON.stringify(requestBody)
         });
         
         if (!response.ok) {
