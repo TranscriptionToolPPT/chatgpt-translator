@@ -755,3 +755,244 @@ function clearChat() {
         </div>
     `;
 }
+
+// ===== FILE UPLOAD & IMAGE TRANSLATION =====
+
+async function handleFileUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const apiKey = localStorage.getItem('openai_api_key');
+    if (!apiKey) {
+        addChatBubble('system-msg', '⚠️ Please save your API key first!');
+        return;
+    }
+
+    const uploadStatus = document.getElementById('uploadStatus');
+    const uploadBtn = document.querySelector('.btn-upload');
+    const targetLang = LANGUAGE_MAP[document.getElementById('targetLang').value] || 'Arabic';
+    const mode = document.getElementById('translationMode').value;
+
+    // Reset file input
+    event.target.value = '';
+
+    // Show loading
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = '⏳ Processing...';
+    uploadStatus.style.display = 'block';
+    uploadStatus.textContent = `📎 Reading: ${file.name}`;
+
+    try {
+        if (file.type === 'application/pdf') {
+            // PDF handling - convert first page to image
+            await handlePDFUpload(file, apiKey, targetLang, mode, uploadStatus);
+        } else if (file.type.startsWith('image/')) {
+            // Image handling
+            await handleImageUpload(file, apiKey, targetLang, mode, uploadStatus);
+        } else {
+            addChatBubble('system-msg', '❌ Please upload an image (JPG, PNG) or PDF file.');
+        }
+    } catch (error) {
+        addChatBubble('system-msg', `❌ Error: ${error.message}`);
+    } finally {
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = '📎 Upload Image / PDF → Translate';
+        uploadStatus.style.display = 'none';
+    }
+}
+
+// Handle image file upload
+async function handleImageUpload(file, apiKey, targetLang, mode, uploadStatus) {
+    uploadStatus.textContent = '🔍 Reading image with AI...';
+
+    // Convert to base64
+    const base64 = await fileToBase64(file);
+    const mediaType = file.type;
+
+    addChatBubble('user', `📎 Uploaded: ${file.name}\n🌐 Translate to: ${targetLang}`);
+
+    showTyping();
+    uploadStatus.textContent = '🤖 AI is translating...';
+
+    const model = document.getElementById('modelSelect').value;
+    const modePrompt = getModePromptForUpload(mode, targetLang);
+
+    const requestBody = {
+        model: 'gpt-4o',  // Always use gpt-4o for vision (supports images)
+        messages: [
+            ...chatHistory,
+            {
+                role: 'user',
+                content: [
+                    {
+                        type: 'image_url',
+                        image_url: {
+                            url: `data:${mediaType};base64,${base64}`,
+                            detail: 'high'
+                        }
+                    },
+                    {
+                        type: 'text',
+                        text: modePrompt
+                    }
+                ]
+            }
+        ],
+        max_tokens: 4000
+    };
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(requestBody)
+    });
+
+    hideTyping();
+
+    if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error?.message || `HTTP Error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const result = data.choices?.[0]?.message?.content || 'No response received.';
+
+    // Add to chat history
+    chatHistory.push({
+        role: 'user',
+        content: `[Image uploaded: ${file.name}] Please translate to ${targetLang}`
+    });
+    chatHistory.push({ role: 'assistant', content: result });
+
+    addChatBubble('assistant', result);
+
+    // Update usage stats
+    if (data.usage) {
+        updateUsageStats(
+            result.split(/\s+/).length,
+            data.usage,
+            'gpt-4o',
+            null
+        );
+    }
+}
+
+// Handle PDF upload - render first page as image
+async function handlePDFUpload(file, apiKey, targetLang, mode, uploadStatus) {
+    uploadStatus.textContent = '📄 Converting PDF to image...';
+
+    try {
+        // Use FileReader to read PDF as base64 and send directly
+        const base64 = await fileToBase64(file);
+
+        addChatBubble('user', `📎 Uploaded PDF: ${file.name}\n🌐 Translate to: ${targetLang}`);
+
+        showTyping();
+        uploadStatus.textContent = '🤖 AI is reading and translating PDF...';
+
+        const modePrompt = getModePromptForUpload(mode, targetLang);
+
+        const requestBody = {
+            model: 'gpt-4o',
+            messages: [
+                ...chatHistory,
+                {
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: modePrompt
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: {
+                                url: `data:application/pdf;base64,${base64}`,
+                                detail: 'high'
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens: 4000
+        };
+
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(requestBody)
+        });
+
+        hideTyping();
+
+        if (!response.ok) {
+            const err = await response.json();
+            // PDF not supported as image - tell user to convert to image
+            if (err.error?.message?.includes('image')) {
+                addChatBubble('system-msg', '💡 PDF vision not supported. Please convert the PDF page to an image (screenshot or JPG) and upload again.');
+                return;
+            }
+            throw new Error(err.error?.message || `HTTP Error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const result = data.choices?.[0]?.message?.content || 'No response received.';
+
+        chatHistory.push({ role: 'user', content: `[PDF uploaded: ${file.name}]` });
+        chatHistory.push({ role: 'assistant', content: result });
+
+        addChatBubble('assistant', result);
+
+        if (data.usage) {
+            updateUsageStats(result.split(/\s+/).length, data.usage, 'gpt-4o', null);
+        }
+
+    } catch (error) {
+        hideTyping();
+        throw error;
+    }
+}
+
+// Build translation prompt based on mode
+function getModePromptForUpload(mode, targetLang) {
+    const modeInstructions = {
+        'legal': `You are a certified legal translator. Extract ALL text from this document and translate it to ${targetLang}. Use precise legal terminology. Keep all names, dates, reference numbers, and IDs exactly as they appear.`,
+        'certificate': `You are an official document translator. Extract ALL text from this certificate and translate it to ${targetLang}. Keep names, dates, ID numbers, and official seals unchanged. Use formal government language.`,
+        'bank': `You are a financial document translator. Extract ALL text from this bank document and translate it to ${targetLang}. Keep account numbers, amounts, dates, and reference codes unchanged.`,
+        'medical': `You are a medical translator. Extract ALL text from this medical document and translate it to ${targetLang}. Keep patient names, dates, test values, and measurements unchanged.`,
+        'government': `You are an official government document translator. Extract ALL text and translate to ${targetLang}. Keep all reference numbers, dates, names, and official codes unchanged.`,
+        'business': `You are a business document translator. Extract ALL text and translate to ${targetLang}. Keep company names, amounts, dates, and clause numbers unchanged.`
+    };
+
+    const basePrompt = modeInstructions[mode] || `You are a professional translator. Extract ALL text from this document and translate it to ${targetLang}. Keep all names, dates, numbers, and IDs exactly as they appear.`;
+
+    return `${basePrompt}
+
+Format your response as:
+**ORIGINAL TEXT (extracted):**
+[the extracted text]
+
+**TRANSLATION (${targetLang}):**
+[the full translation]
+
+CRITICAL RULES:
+- Extract EVERY word visible in the document
+- Do NOT skip any text
+- Preserve the document structure and layout in the translation
+- Keep all numbers, dates, names, and IDs unchanged`;
+}
+
+// Convert file to base64
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
