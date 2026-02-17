@@ -435,6 +435,15 @@
             background: #f8f9fa; color: #6c757d; font-size: 11px; cursor: pointer;
         }
         .btn-clear-chat:hover { background: #e9ecef; }
+        .btn-upload {
+            width: 100%; padding: 10px; border: 2px dashed #C9A961;
+            border-radius: 8px; background: linear-gradient(135deg, #fffdf5 0%, #fff8e6 100%);
+            color: #8B7355; font-size: 12px; font-weight: 700;
+            cursor: pointer; transition: all 0.2s; text-align: center;
+            letter-spacing: 0.3px;
+        }
+        .btn-upload:hover { background: linear-gradient(135deg, #C9A961 0%, #8B7355 100%); color: white; border-style: solid; }
+        .btn-upload:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -617,6 +626,15 @@
                 <button class="btn-chat-action" onclick="sendQuickMessage('translate_selection')">📄 Translate Selection</button>
                 <button class="btn-chat-action" onclick="sendQuickMessage('explain_selection')">🔍 Explain</button>
                 <button class="btn-chat-action" onclick="sendQuickMessage('improve_selection')">✨ Improve</button>
+            </div>
+
+            <!-- Upload Image/PDF Button -->
+            <div style="margin-bottom:10px;">
+                <input type="file" id="fileUpload" accept="image/*,.pdf" style="display:none;" onchange="handleFileUpload(event)">
+                <button class="btn-upload" onclick="document.getElementById('fileUpload').click()">
+                    📎 Upload Image / PDF → Translate
+                </button>
+                <div id="uploadStatus" style="display:none; font-size:11px; color:#856404; background:#fff3cd; padding:6px 10px; border-radius:6px; margin-top:6px; border-left:3px solid #C9A961;"></div>
             </div>
 
             <!-- Chat Messages -->
