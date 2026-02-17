@@ -71,7 +71,7 @@
             background: white;
             margin: 0 auto;
             padding: 20px;
-            max-width: 700px;
+            max-width: 540px;
             box-shadow: 0 8px 24px rgba(0,0,0,0.12);
         }
         
@@ -348,9 +348,93 @@
             border-radius: 4px;
         }
         
-        ::-webkit-scrollbar-thumb:hover {
-            background: #8B7355;
+        ::-webkit-scrollbar-thumb:hover { background: #8B7355; }
+
+        /* ===== CHAT PANEL ===== */
+        .chat-messages {
+            height: 280px; overflow-y: auto; padding: 12px;
+            background: #f8f9fa; border-radius: 8px;
+            border: 1px solid #e8e8e8; margin-bottom: 10px;
+            display: flex; flex-direction: column; gap: 10px;
         }
+        .chat-welcome { text-align: center; color: #999; font-size: 12px; padding: 20px 10px; }
+        .chat-welcome-icon { font-size: 32px; margin-bottom: 8px; }
+        .chat-bubble {
+            max-width: 85%; padding: 10px 13px; border-radius: 12px;
+            font-size: 13px; line-height: 1.5; word-break: break-word;
+            animation: bubbleIn 0.2s ease;
+        }
+        @keyframes bubbleIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .chat-bubble.user {
+            background: linear-gradient(135deg, #C9A961 0%, #8B7355 100%);
+            color: white; align-self: flex-end; border-bottom-right-radius: 3px;
+        }
+        .chat-bubble.assistant {
+            background: white; color: #2d2d2d; align-self: flex-start;
+            border: 1px solid #e8e8e8; border-bottom-left-radius: 3px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        }
+        .bubble-label {
+            font-size: 10px; font-weight: 700; color: #C9A961;
+            text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+        }
+        .chat-bubble.system-msg {
+            background: #fff3cd; color: #856404; align-self: center;
+            font-size: 11px; border: 1px solid #ffc107; border-radius: 8px;
+            padding: 6px 12px; max-width: 95%; text-align: center;
+        }
+        .typing-indicator {
+            display: flex; align-items: center; gap: 4px; padding: 10px 13px;
+            background: white; border-radius: 12px; border-bottom-left-radius: 3px;
+            border: 1px solid #e8e8e8; align-self: flex-start; width: fit-content;
+        }
+        .typing-dot {
+            width: 7px; height: 7px; background: #C9A961;
+            border-radius: 50%; animation: typing 1.2s infinite;
+        }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+            30% { transform: translateY(-6px); opacity: 1; }
+        }
+        .chat-input-row { display: flex; gap: 8px; align-items: flex-end; }
+        .chat-input-row textarea {
+            flex: 1; padding: 9px 12px; border: 2px solid #e0e0e0;
+            border-radius: 8px; font-size: 13px; font-family: 'Segoe UI', sans-serif;
+            resize: none; min-height: 40px; max-height: 100px;
+            transition: border-color 0.3s; background: #fafafa;
+        }
+        .chat-input-row textarea:focus {
+            outline: none; border-color: #C9A961; background: white;
+            box-shadow: 0 0 0 3px rgba(201,169,97,0.1);
+        }
+        .btn-send {
+            width: 40px; height: 40px; padding: 0; border-radius: 8px;
+            background: linear-gradient(135deg, #C9A961 0%, #8B7355 100%);
+            color: white; font-size: 18px; cursor: pointer; border: none;
+            flex-shrink: 0; transition: all 0.2s;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .btn-send:hover { transform: scale(1.05); box-shadow: 0 4px 12px rgba(201,169,97,0.4); }
+        .btn-send:disabled { opacity: 0.5; transform: none; }
+        .chat-actions { display: flex; gap: 6px; margin-bottom: 10px; }
+        .btn-chat-action {
+            flex: 1; padding: 7px 4px; border: 1px solid #C9A961;
+            border-radius: 6px; background: white; color: #8B7355;
+            font-size: 10px; font-weight: 600; cursor: pointer;
+            transition: all 0.2s; text-align: center;
+        }
+        .btn-chat-action:hover { background: linear-gradient(135deg, #C9A961 0%, #8B7355 100%); color: white; }
+        .chat-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .btn-clear-chat {
+            padding: 4px 10px; border: none; border-radius: 6px;
+            background: #f8f9fa; color: #6c757d; font-size: 11px; cursor: pointer;
+        }
+        .btn-clear-chat:hover { background: #e9ecef; }
     </style>
 </head>
 <body>
@@ -393,9 +477,11 @@
             <div class="form-group">
                 <label for="modelSelect">AI Model</label>
                 <select id="modelSelect">
-                    <option value="gpt-4.1" selected>GPT-4.1 - Office Standard</option>
-                    <option value="gpt-5.2">GPT-5.2 - Premium Complex</option>
-                    <option value="gpt-4o-mini">GPT-4o-mini - Fast Mode</option>
+                    <option value="gpt-4o" selected>GPT-4o - Recommended (Balanced)</option>
+                    <option value="gpt-4o-mini">GPT-4o-mini - Fast & Economical</option>
+                    <option value="gpt-4-turbo">GPT-4 Turbo - Highest Quality</option>
+                    <option value="o1-mini">O1 Mini - Advanced Reasoning</option>
+                    <option value="o1">O1 - Premium Reasoning</option>
                 </select>
             </div>
             
@@ -514,6 +600,44 @@
             <button class="btn-secondary" onclick="resetStats()" style="margin-top: 12px;">
                 🔄 Reset Statistics
             </button>
+        </div>
+        
+        <!-- Chat Panel -->
+        <div class="card">
+            <div class="chat-header-row">
+                <div class="card-title" style="margin-bottom:0;">
+                    <span class="icon">💬</span>
+                    AI Assistant
+                </div>
+                <button class="btn-clear-chat" onclick="clearChat()">🗑️ Clear</button>
+            </div>
+
+            <!-- Quick Action Buttons -->
+            <div class="chat-actions">
+                <button class="btn-chat-action" onclick="sendQuickMessage('translate_selection')">📄 Translate Selection</button>
+                <button class="btn-chat-action" onclick="sendQuickMessage('explain_selection')">🔍 Explain</button>
+                <button class="btn-chat-action" onclick="sendQuickMessage('improve_selection')">✨ Improve</button>
+            </div>
+
+            <!-- Chat Messages -->
+            <div class="chat-messages" id="chatMessages">
+                <div class="chat-welcome">
+                    <div class="chat-welcome-icon">🤖</div>
+                    <div><strong>Dar Al Marjaan Assistant</strong></div>
+                    <div style="margin-top:6px;">Ask me anything about your document, give me context about your project, or request a translation!</div>
+                </div>
+            </div>
+
+            <!-- Chat Input -->
+            <div class="chat-input-row">
+                <textarea 
+                    id="chatInput" 
+                    placeholder="Ask me anything... e.g. 'This document is a legal contract between...' or 'Translate the selected text'"
+                    onkeydown="handleChatKeydown(event)"
+                    rows="1"
+                ></textarea>
+                <button class="btn-send" id="sendBtn" onclick="sendChatMessage()">➤</button>
+            </div>
         </div>
     </div>
     
