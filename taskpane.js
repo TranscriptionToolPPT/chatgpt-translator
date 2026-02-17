@@ -545,3 +545,213 @@ function showStatus(message, type) {
         }, 5000);
     }
 }
+
+// ===== CHAT FUNCTIONALITY =====
+
+// Chat history (memory)
+let chatHistory = [];
+
+// Add message to chat UI
+function addChatBubble(role, text) {
+    const container = document.getElementById('chatMessages');
+
+    // Remove welcome message on first message
+    const welcome = container.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+
+    const bubble = document.createElement('div');
+
+    if (role === 'user') {
+        bubble.className = 'chat-bubble user';
+        bubble.textContent = text;
+    } else if (role === 'system-msg') {
+        bubble.className = 'chat-bubble system-msg';
+        bubble.textContent = text;
+    } else {
+        bubble.className = 'chat-bubble assistant';
+        bubble.innerHTML = `<div class="bubble-label">🤖 Assistant</div>${text.replace(/\n/g, '<br>')}`;
+    }
+
+    container.appendChild(bubble);
+    container.scrollTop = container.scrollHeight;
+    return bubble;
+}
+
+// Show typing indicator
+function showTyping() {
+    const container = document.getElementById('chatMessages');
+    const typing = document.createElement('div');
+    typing.className = 'typing-indicator';
+    typing.id = 'typingIndicator';
+    typing.innerHTML = '<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>';
+    container.appendChild(typing);
+    container.scrollTop = container.scrollHeight;
+}
+
+// Remove typing indicator
+function hideTyping() {
+    const typing = document.getElementById('typingIndicator');
+    if (typing) typing.remove();
+}
+
+// Handle Enter key in chat input
+function handleChatKeydown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendChatMessage();
+    }
+}
+
+// Send message from quick action buttons
+async function sendQuickMessage(action) {
+    const apiKey = localStorage.getItem('openai_api_key');
+    if (!apiKey) {
+        addChatBubble('system-msg', '⚠️ Please save your API key first!');
+        return;
+    }
+
+    try {
+        await Word.run(async (context) => {
+            const range = context.document.getSelection();
+            range.load('text');
+            await context.sync();
+
+            const selectedText = range.text.trim();
+
+            if (!selectedText) {
+                addChatBubble('system-msg', '⚠️ Please select text in your document first!');
+                return;
+            }
+
+            let userMessage = '';
+            if (action === 'translate_selection') {
+                const targetLang = LANGUAGE_MAP[document.getElementById('targetLang').value];
+                userMessage = `Please translate this text to ${targetLang}:\n\n"${selectedText}"`;
+            } else if (action === 'explain_selection') {
+                userMessage = `Please explain what this text means:\n\n"${selectedText}"`;
+            } else if (action === 'improve_selection') {
+                userMessage = `Please improve and refine this text:\n\n"${selectedText}"`;
+            }
+
+            await processChatMessage(userMessage, apiKey);
+        });
+    } catch (e) {
+        addChatBubble('system-msg', '⚠️ Could not read selection from document.');
+        const apiKey = localStorage.getItem('openai_api_key');
+        if (action === 'translate_selection') {
+            await processChatMessage('Please help me translate some text.', apiKey);
+        }
+    }
+}
+
+// Main chat send function
+async function sendChatMessage() {
+    const input = document.getElementById('chatInput');
+    const userMessage = input.value.trim();
+
+    if (!userMessage) return;
+
+    const apiKey = localStorage.getItem('openai_api_key');
+    if (!apiKey) {
+        addChatBubble('system-msg', '⚠️ Please save your API key first!');
+        return;
+    }
+
+    input.value = '';
+    input.style.height = 'auto';
+
+    await processChatMessage(userMessage, apiKey);
+}
+
+// Process and send chat message to API
+async function processChatMessage(userMessage, apiKey) {
+    const sendBtn = document.getElementById('sendBtn');
+    sendBtn.disabled = true;
+
+    // Add user message to UI and history
+    addChatBubble('user', userMessage);
+    chatHistory.push({ role: 'user', content: userMessage });
+
+    // Show typing
+    showTyping();
+
+    try {
+        const model = document.getElementById('modelSelect').value;
+
+        // Build messages array with system context
+        const messages = [
+            {
+                role: 'system',
+                content: `You are an expert translation assistant for Dar Al Marjaan Translation Services. 
+You help with document translation, terminology, and language questions.
+You are working inside Microsoft Word as an add-in.
+When the user gives you context about a document (names, IDs, terminology), remember it for future translations.
+Be concise but helpful. If asked to translate text, provide the translation directly.
+Current translation settings: Mode = ${document.getElementById('translationMode')?.value || 'general'}, Style = ${document.getElementById('translationStyle')?.value || 'balanced'}.`
+            },
+            ...chatHistory
+        ];
+
+        // Prepare request
+        const requestBody = {
+            model: model,
+            messages: messages,
+            temperature: 0.5
+        };
+
+        if (model.includes('gpt-5') || model.includes('o1')) {
+            requestBody.max_completion_tokens = 1000;
+        } else {
+            requestBody.max_tokens = 1000;
+        }
+
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(requestBody)
+        });
+
+        hideTyping();
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error?.message || `HTTP Error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const assistantMessage = data.content?.[0]?.text || data.choices?.[0]?.message?.content || 'No response received.';
+
+        // Add to history and UI
+        chatHistory.push({ role: 'assistant', content: assistantMessage });
+        addChatBubble('assistant', assistantMessage);
+
+        // Keep history manageable (last 20 messages)
+        if (chatHistory.length > 20) {
+            chatHistory = chatHistory.slice(-20);
+        }
+
+    } catch (error) {
+        hideTyping();
+        addChatBubble('system-msg', `❌ Error: ${error.message}`);
+        // Remove last user message from history on error
+        chatHistory.pop();
+    } finally {
+        sendBtn.disabled = false;
+    }
+}
+
+// Clear chat history
+function clearChat() {
+    chatHistory = [];
+    const container = document.getElementById('chatMessages');
+    container.innerHTML = `
+        <div class="chat-welcome">
+            <div class="chat-welcome-icon">🤖</div>
+            <div><strong>Dar Al Marjaan Assistant</strong></div>
+            <div style="margin-top:6px;">Ask me anything about your document, give me context about your project, or request a translation!</div>
+        </div>
+    `;
+}
