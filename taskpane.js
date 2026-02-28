@@ -37,11 +37,9 @@ const LANGUAGE_MAP = {
 
 // Model pricing (per 1M tokens)
 const MODEL_PRICING = {
-    'gpt-4o-mini': { input: 0.150, output: 0.600 },
-    'gpt-4o': { input: 2.50, output: 10.00 },
-    'gpt-4-turbo': { input: 10.00, output: 30.00 },
-    'o1-mini': { input: 3.00, output: 12.00 },
-    'o1': { input: 15.00, output: 60.00 }
+    'gpt-4.1': { input: 3.00, output: 12.00 },      // Main office model
+    'gpt-5.2': { input: 20.00, output: 80.00 },     // Premium for complex files
+    'gpt-4o-mini': { input: 0.150, output: 0.600 }  // Fast & economical
 };
 
 // Build system prompt based on translation mode and style
@@ -880,41 +878,80 @@ async function handleImageUpload(file, apiKey, targetLang, mode, uploadStatus) {
     }
 }
 
-// Handle PDF upload - render first page as image
+// Handle PDF upload - convert to image using canvas then send
 async function handlePDFUpload(file, apiKey, targetLang, mode, uploadStatus) {
-    uploadStatus.textContent = '📄 Converting PDF to image...';
+    uploadStatus.textContent = '📄 Converting PDF pages to images...';
 
     try {
-        // Use FileReader to read PDF as base64 and send directly
-        const base64 = await fileToBase64(file);
-
         addChatBubble('user', `📎 Uploaded PDF: ${file.name}\n🌐 Translate to: ${targetLang}`);
 
+        // Load PDF.js from CDN
+        if (!window.pdfjsLib) {
+            uploadStatus.textContent = '⏳ Loading PDF engine...';
+            await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+
+        // Read PDF file
+        const arrayBuffer = await file.arrayBuffer();
+        const pdfDoc = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+        const totalPages = pdfDoc.numPages;
+        const pageImages = [];
+
+        uploadStatus.textContent = `📄 Converting ${totalPages} page(s)...`;
+
+        // Convert each page to image (max 6 pages to avoid token limits)
+        const maxPages = Math.min(totalPages, 6);
+
+        for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+            uploadStatus.textContent = `📄 Converting page ${pageNum}/${maxPages}...`;
+
+            const page = await pdfDoc.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 2.0 }); // High quality
+
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+
+            await page.render({ canvasContext: ctx, viewport }).promise;
+
+            const base64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+            pageImages.push(base64);
+        }
+
+        if (totalPages > maxPages) {
+            addChatBubble('system-msg', `📄 PDF has ${totalPages} pages. Translating first ${maxPages} pages.`);
+        }
+
         showTyping();
-        uploadStatus.textContent = '🤖 AI is reading and translating PDF...';
+        uploadStatus.textContent = '🤖 AI is reading and translating...';
 
         const modePrompt = getModePromptForUpload(mode, targetLang);
+
+        // Build content array with all page images
+        const contentArray = [{ type: 'text', text: modePrompt }];
+
+        for (let i = 0; i < pageImages.length; i++) {
+            contentArray.push({
+                type: 'text',
+                text: pageImages.length > 1 ? `--- Page ${i + 1} ---` : ''
+            });
+            contentArray.push({
+                type: 'image_url',
+                image_url: {
+                    url: `data:image/jpeg;base64,${pageImages[i]}`,
+                    detail: 'high'
+                }
+            });
+        }
 
         const requestBody = {
             model: 'gpt-4o',
             messages: [
                 ...chatHistory,
-                {
-                    role: 'user',
-                    content: [
-                        {
-                            type: 'text',
-                            text: modePrompt
-                        },
-                        {
-                            type: 'image_url',
-                            image_url: {
-                                url: `data:application/pdf;base64,${base64}`,
-                                detail: 'high'
-                            }
-                        }
-                    ]
-                }
+                { role: 'user', content: contentArray }
             ],
             max_tokens: 4000
         };
@@ -932,18 +969,13 @@ async function handlePDFUpload(file, apiKey, targetLang, mode, uploadStatus) {
 
         if (!response.ok) {
             const err = await response.json();
-            // PDF not supported as image - tell user to convert to image
-            if (err.error?.message?.includes('image')) {
-                addChatBubble('system-msg', '💡 PDF vision not supported. Please convert the PDF page to an image (screenshot or JPG) and upload again.');
-                return;
-            }
             throw new Error(err.error?.message || `HTTP Error: ${response.status}`);
         }
 
         const data = await response.json();
         const result = data.choices?.[0]?.message?.content || 'No response received.';
 
-        chatHistory.push({ role: 'user', content: `[PDF uploaded: ${file.name}]` });
+        chatHistory.push({ role: 'user', content: `[PDF uploaded: ${file.name}, ${maxPages} pages]` });
         chatHistory.push({ role: 'assistant', content: result });
 
         addChatBubble('assistant', result);
@@ -954,8 +986,28 @@ async function handlePDFUpload(file, apiKey, targetLang, mode, uploadStatus) {
 
     } catch (error) {
         hideTyping();
-        throw error;
+        // If PDF.js fails, ask user to take screenshot
+        if (error.message.includes('PDF') || error.message.includes('script')) {
+            addChatBubble('system-msg', '💡 Could not process PDF automatically. Please take a screenshot of the page (Windows + Shift + S) and upload as image instead.');
+        } else {
+            throw error;
+        }
     }
+}
+
+// Load external script dynamically
+function loadScript(src) {
+    return new Promise((resolve, reject) => {
+        if (document.querySelector(`script[src="${src}"]`)) {
+            resolve();
+            return;
+        }
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+    });
 }
 
 // Build translation prompt based on mode
