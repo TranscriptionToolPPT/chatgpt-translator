@@ -331,8 +331,21 @@ async function applyChatToWord() {
 
     // Parse pipe-separated pairs: "source | translation"
     const pairs = parseChatPairs(lastAssistant.content);
-    if (Object.keys(pairs).length === 0) {
-        showStatus('⚠️ Could not parse pairs from chat. Ask for format: "اسم | Name"', 'error');
+    const hasPairs = Object.keys(pairs).length > 0;
+
+    // If no pairs found → treat entire chat response as direct translation for selected text
+    if (!hasPairs) {
+        try {
+            await Word.run(async (context) => {
+                const range = context.document.getSelection();
+                range.load("text");
+                await context.sync();
+                if (!range.text.trim()) { showStatus("⚠️ No text selected in Word", "error"); return; }
+                range.insertText(lastAssistant.content.trim(), Word.InsertLocation.replace);
+                await context.sync();
+                showStatus("✅ Applied chat response to selection", "success");
+            });
+        } catch(err) { showStatus("❌ Error: " + err.message, "error"); }
         return;
     }
 
