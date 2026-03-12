@@ -444,6 +444,57 @@
         }
         .btn-upload:hover { background: linear-gradient(135deg, #C9A961 0%, #8B7355 100%); color: white; border-style: solid; }
         .btn-upload:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* ===== MEMORY / CACHE PANEL ===== */
+        .toggle-row {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 0; border-bottom: 1px solid #f0f0f0;
+        }
+        .toggle-row:last-child { border-bottom: none; }
+        .toggle-label { font-size: 12px; color: #4a4a4a; font-weight: 600; }
+        .toggle-label small { display: block; font-weight: 400; color: #999; font-size: 10px; margin-top: 1px; }
+        .toggle-switch {
+            position: relative; width: 40px; height: 22px;
+            background: #ddd; border-radius: 11px; cursor: pointer;
+            transition: background 0.3s; flex-shrink: 0;
+        }
+        .toggle-switch.on { background: linear-gradient(135deg, #C9A961, #8B7355); }
+        .toggle-switch::after {
+            content: ''; position: absolute; top: 3px; left: 3px;
+            width: 16px; height: 16px; background: white; border-radius: 50%;
+            transition: left 0.3s; box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+        .toggle-switch.on::after { left: 21px; }
+        .memory-stats {
+            display: flex; gap: 8px; margin: 10px 0;
+        }
+        .memory-stat {
+            flex: 1; background: #f8f9fa; border-radius: 6px; padding: 8px;
+            text-align: center; border-left: 3px solid #C9A961;
+        }
+        .memory-stat-val { font-size: 18px; font-weight: 700; color: #2d2d2d; }
+        .memory-stat-lbl { font-size: 9px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }
+        .btn-danger {
+            background: linear-gradient(135deg, #dc3545, #c82333);
+            color: white; font-size: 12px; padding: 8px;
+        }
+        .btn-danger:hover { background: linear-gradient(135deg, #c82333, #a71d2a); }
+        .btn-apply {
+            background: linear-gradient(135deg, #28a745, #20c997);
+            color: white; font-size: 11px; padding: 7px 12px;
+            border-radius: 6px; border: none; cursor: pointer;
+            font-weight: 700; transition: all 0.2s; letter-spacing: 0.3px;
+            width: auto;
+        }
+        .btn-apply:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(40,167,69,0.3); }
+        .cache-preview {
+            background: #f8f9fa; border-radius: 6px; padding: 8px;
+            font-size: 11px; max-height: 100px; overflow-y: auto;
+            border: 1px solid #e8e8e8; margin-top: 8px; display: none;
+        }
+        .cache-entry { padding: 3px 0; border-bottom: 1px solid #eee; color: #555; }
+        .cache-entry:last-child { border-bottom: none; }
+        .cache-arrow { color: #C9A961; font-weight: 700; margin: 0 4px; }
     </style>
 </head>
 <body>
@@ -474,6 +525,19 @@
                 <input type="password" id="apiKey" placeholder="sk-proj-...">
                 <button class="btn-secondary" onclick="saveApiKey()">💾 Save Key</button>
             </div>
+
+            <div class="form-group" style="margin-top:14px;">
+                <label for="googleSheetUrl">
+                    📊 Google Sheets Log URL (Optional)
+                    <span id="sheetSaved" class="badge" style="display:none; background:#17a2b8;">✓ Connected</span>
+                </label>
+                <input type="text" id="googleSheetUrl" placeholder="https://script.google.com/macros/s/.../exec" style="font-size:11px;">
+                <button class="btn-secondary" onclick="saveGoogleSheetUrl()">📊 Save Sheet URL</button>
+                <div style="font-size:10px; color:#6c757d; margin-top:4px;">
+                    All translations will be logged to your Google Sheet automatically. 
+                    <a href="#" onclick="showSheetInstructions(); return false;" style="color:#C9A961;">Setup Guide</a>
+                </div>
+            </div>
         </div>
         
         <!-- Translation Settings Card -->
@@ -486,8 +550,8 @@
             <div class="form-group">
                 <label for="modelSelect">AI Model</label>
                 <select id="modelSelect">
-                    <option value="gpt-4.1" selected>GPT-4.1 - Office Standard</option>
-                    <option value="gpt-5.2">GPT-5.2 - Premium Complex</option>
+                    <option value="gpt-4.1">GPT-4.1 - Office Standard</option>
+                    <option value="gpt-5.2" selected>GPT-5.2 - Premium Complex</option>
                     <option value="gpt-4o-mini">GPT-4o-mini - Fast & Economical</option>
                 </select>
             </div>
@@ -654,6 +718,76 @@
                 ></textarea>
                 <button class="btn-send" id="sendBtn" onclick="sendChatMessage()">➤</button>
             </div>
+
+            <!-- Apply Chat Translation to Word -->
+            <div style="margin-top:10px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                <button class="btn-apply" onclick="applyChatToWord()">
+                    📥 Apply Chat → Word
+                </button>
+                <span style="font-size:10px; color:#999;">Replaces selection using last chat mapping</span>
+            </div>
+        </div>
+
+        <!-- Translation Memory Card -->
+        <div class="card">
+            <div class="card-title">
+                <span class="icon">🧠</span>
+                Translation Memory
+            </div>
+
+            <!-- Stats -->
+            <div class="memory-stats">
+                <div class="memory-stat">
+                    <div class="memory-stat-val" id="cacheCount">0</div>
+                    <div class="memory-stat-lbl">Saved Pairs</div>
+                </div>
+                <div class="memory-stat">
+                    <div class="memory-stat-val" id="cacheHits">0</div>
+                    <div class="memory-stat-lbl">Cache Hits</div>
+                </div>
+                <div class="memory-stat">
+                    <div class="memory-stat-val" id="cacheSaved">$0.00</div>
+                    <div class="memory-stat-lbl">Cost Saved</div>
+                </div>
+            </div>
+
+            <!-- Toggles -->
+            <div class="toggle-row">
+                <div class="toggle-label">
+                    Use Translation Memory
+                    <small>Check cache before calling AI</small>
+                </div>
+                <div class="toggle-switch on" id="toggleUseCache" onclick="toggleSetting('useCache')"></div>
+            </div>
+
+            <div class="toggle-row">
+                <div class="toggle-label">
+                    Replace All Similar in Document
+                    <small>Off = replace selected text only</small>
+                </div>
+                <div class="toggle-switch" id="toggleReplaceAll" onclick="toggleSetting('replaceAll')"></div>
+            </div>
+
+            <div class="toggle-row">
+                <div class="toggle-label">
+                    Lock Numbers & Dates
+                    <small>Never modify numbers, IDs, dates</small>
+                </div>
+                <div class="toggle-switch on" id="toggleLockNumbers" onclick="toggleSetting('lockNumbers')"></div>
+            </div>
+
+            <!-- Cache Preview -->
+            <div style="margin-top:10px;">
+                <button class="btn-secondary" onclick="toggleCachePreview()" style="font-size:11px; padding:7px;">
+                    👁️ View Saved Pairs
+                </button>
+                <div class="cache-preview" id="cachePreview"></div>
+            </div>
+
+            <!-- Clear Cache -->
+            <button class="btn-danger" onclick="clearCache()" style="margin-top:10px;">
+                🗑️ Clear Translation Memory
+            </button>
         </div>
     </div>
     
