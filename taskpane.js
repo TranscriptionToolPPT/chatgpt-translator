@@ -154,6 +154,273 @@ let usageStats = {
     totalCost: 0
 };
 
+// Sync all data to server (so dashboard always has latest)
+async function syncToServer() {
+    try {
+        await fetch('http://localhost:3000/api/stats', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                usageStats,
+                cacheStats,
+                translationCache
+            })
+        });
+    } catch(e) {
+        // Server might not be running, silently ignore
+    }
+}
+
+// Log a single translation to server
+async function logToServer(logData) {
+    try {
+        await fetch('http://localhost:3000/api/log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(logData)
+        });
+    } catch(e) {}
+}
+
+// Settings with defaults
+let memorySettings = {
+    useCache: true,
+    replaceAll: false,
+    lockNumbers: true
+};
+
+// In-memory cache object (synced with localStorage)
+let translationCache = {};
+let cacheStats = { hits: 0, savedCost: 0 };
+
+function loadMemorySystem() {
+    // Load settings
+    const savedSettings = localStorage.getItem('memory_settings');
+    if (savedSettings) {
+        memorySettings = { ...memorySettings, ...JSON.parse(savedSettings) };
+    }
+    // Load cache
+    const savedCache = localStorage.getItem('translation_cache');
+    if (savedCache) {
+        translationCache = JSON.parse(savedCache);
+    }
+    // Load cache stats
+    const savedCacheStats = localStorage.getItem('cache_stats');
+    if (savedCacheStats) {
+        cacheStats = JSON.parse(savedCacheStats);
+    }
+    // Sync toggles UI
+    syncToggleUI();
+    updateCacheDisplay();
+}
+
+function syncToggleUI() {
+    ['useCache', 'replaceAll', 'lockNumbers'].forEach(key => {
+        const el = document.getElementById('toggle' + key.charAt(0).toUpperCase() + key.slice(1));
+        if (el) {
+            el.classList.toggle('on', !!memorySettings[key]);
+        }
+    });
+}
+
+function toggleSetting(key) {
+    memorySettings[key] = !memorySettings[key];
+    syncToggleUI();
+    localStorage.setItem('memory_settings', JSON.stringify(memorySettings));
+    showStatus(`${key === 'useCache' ? '🧠 Memory' : key === 'replaceAll' ? '🔄 Replace All' : '🔒 Lock Numbers'}: ${memorySettings[key] ? 'ON' : 'OFF'}`, 'info');
+}
+
+// Build cache key
+function cacheKey(text, fromLang, toLang) {
+    return `${fromLang}_${toLang}_${text.trim()}`;
+}
+
+// Lookup exact match in cache
+function lookupCache(text, fromLang, toLang) {
+    if (!memorySettings.useCache) return null;
+    const key = cacheKey(text, fromLang, toLang);
+    return translationCache[key] || null;
+}
+
+// Save to cache
+function saveToCache(sourceText, translatedText, fromLang, toLang) {
+    const key = cacheKey(sourceText, fromLang, toLang);
+    translationCache[key] = translatedText;
+    localStorage.setItem('translation_cache', JSON.stringify(translationCache));
+    updateCacheDisplay();
+    syncToServer();
+}
+
+// Save multiple pairs from chat mapping: { source: translation, ... }
+function savePairsToCache(pairs, fromLang, toLang) {
+    Object.entries(pairs).forEach(([src, tgt]) => {
+        if (src.trim() && tgt.trim()) {
+            translationCache[cacheKey(src, fromLang, toLang)] = tgt.trim();
+        }
+    });
+    localStorage.setItem('translation_cache', JSON.stringify(translationCache));
+    updateCacheDisplay();
+    syncToServer();
+}
+function recordCacheHit(model) {
+    cacheStats.hits++;
+    // Estimate cost saved: ~50 tokens per phrase at gpt-4.1 pricing
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING['gpt-4.1'];
+    cacheStats.savedCost += (50 / 1000000) * pricing.input + (50 / 1000000) * pricing.output;
+    localStorage.setItem('cache_stats', JSON.stringify(cacheStats));
+    updateCacheDisplay();
+    syncToServer();
+}
+function clearCache() {
+    if (!confirm('Clear all saved translation pairs?')) return;
+    translationCache = {};
+    cacheStats = { hits: 0, savedCost: 0 };
+    localStorage.removeItem('translation_cache');
+    localStorage.removeItem('cache_stats');
+    updateCacheDisplay();
+    showStatus('🗑️ Translation memory cleared', 'info');
+    const preview = document.getElementById('cachePreview');
+    if (preview) { preview.innerHTML = ''; preview.style.display = 'none'; }
+}
+
+// Update cache display in UI
+function updateCacheDisplay() {
+    const count = Object.keys(translationCache).length;
+    const countEl = document.getElementById('cacheCount');
+    const hitsEl = document.getElementById('cacheHits');
+    const savedEl = document.getElementById('cacheSaved');
+    if (countEl) countEl.textContent = count.toLocaleString();
+    if (hitsEl) hitsEl.textContent = cacheStats.hits.toLocaleString();
+    if (savedEl) savedEl.textContent = `$${(cacheStats.savedCost || 0).toFixed(4)}`;
+}
+
+// Toggle cache preview panel
+function toggleCachePreview() {
+    const preview = document.getElementById('cachePreview');
+    if (preview.style.display === 'block') {
+        preview.style.display = 'none';
+        return;
+    }
+    const entries = Object.entries(translationCache);
+    if (entries.length === 0) {
+        preview.innerHTML = '<div style="color:#999; text-align:center; padding:8px;">No saved pairs yet</div>';
+    } else {
+        // Show last 20 entries
+        const html = entries.slice(-20).map(([key, val]) => {
+            const parts = key.split('_');
+            const src = parts.slice(2).join('_'); // everything after lang codes
+            return `<div class="cache-entry">${src}<span class="cache-arrow">→</span>${val}</div>`;
+        }).join('');
+        preview.innerHTML = html + (entries.length > 20 ? `<div style="color:#999; font-size:10px; text-align:center; padding:4px;">...and ${entries.length - 20} more</div>` : '');
+    }
+    preview.style.display = 'block';
+}
+
+// ===== APPLY CHAT → WORD =====
+// Parse the last assistant chat message for source|translation pairs
+// then replace the selected text (or all occurrences) in Word.
+async function applyChatToWord() {
+    const apiKey = localStorage.getItem('openai_api_key');
+
+    // Find last assistant message content
+    const lastAssistant = [...chatHistory].reverse().find(m => m.role === 'assistant');
+    if (!lastAssistant) {
+        showStatus('❌ No chat response to apply. Ask the assistant to translate first.', 'error');
+        return;
+    }
+
+    // Parse pipe-separated pairs: "source | translation"
+    const pairs = parseChatPairs(lastAssistant.content);
+    if (Object.keys(pairs).length === 0) {
+        showStatus('⚠️ Could not parse pairs from chat. Ask for format: "اسم | Name"', 'error');
+        return;
+    }
+
+    const sourceLang = document.getElementById('sourceLang').value;
+    const targetLang = document.getElementById('targetLang').value;
+    const model = document.getElementById('modelSelect').value;
+
+    // Save to cache first
+    savePairsToCache(pairs, sourceLang, targetLang);
+
+    try {
+        await Word.run(async (context) => {
+            if (memorySettings.replaceAll) {
+                // Replace ALL occurrences in the whole document
+                let replacedCount = 0;
+                for (const [src, tgt] of Object.entries(pairs)) {
+                    if (!src.trim()) continue;
+                    const searchResults = context.document.body.search(src.trim(), { matchCase: false, matchWholeWord: false });
+                    searchResults.load('items');
+                    await context.sync();
+                    for (const item of searchResults.items) {
+                        item.insertText(tgt, Word.InsertLocation.replace);
+                        replacedCount++;
+                    }
+                    await context.sync();
+                }
+                showStatus(`✅ Replaced ${replacedCount} occurrence(s) in document`, 'success');
+            } else {
+                // Replace selected text only
+                const range = context.document.getSelection();
+                range.load('text');
+                await context.sync();
+
+                const selectedText = range.text.trim();
+                if (!selectedText) {
+                    showStatus('⚠️ No text selected. Select text in Word first.', 'error');
+                    return;
+                }
+
+                // Find best match in pairs
+                const match = findBestPairMatch(selectedText, pairs);
+                if (match) {
+                    range.insertText(match, Word.InsertLocation.replace);
+                    await context.sync();
+                    recordCacheHit(model);
+                    showStatus(`✅ Applied: "${selectedText}" → "${match}"`, 'success');
+                } else {
+                    showStatus(`⚠️ No match found for "${selectedText}" in chat response`, 'error');
+                }
+            }
+        });
+    } catch (err) {
+        showStatus(`❌ Error: ${err.message}`, 'error');
+    }
+}
+
+// Parse "source | translation" lines from chat response
+function parseChatPairs(text) {
+    const pairs = {};
+    const lines = text.split('\n');
+    for (const line of lines) {
+        if (line.includes('|')) {
+            const parts = line.split('|');
+            if (parts.length >= 2) {
+                // Clean markdown bold/asterisks and extra spaces
+                const src = parts[0].replace(/\*\*/g, '').replace(/^[-•\s]+/, '').trim();
+                const tgt = parts[1].replace(/\*\*/g, '').trim();
+                if (src && tgt) pairs[src] = tgt;
+            }
+        }
+    }
+    return pairs;
+}
+
+// Find exact or close match for selected text in pairs
+function findBestPairMatch(selectedText, pairs) {
+    const normalized = selectedText.trim().toLowerCase();
+    // 1. Exact match
+    for (const [src, tgt] of Object.entries(pairs)) {
+        if (src.trim().toLowerCase() === normalized) return tgt;
+    }
+    // 2. Contains match (selected text is inside a source key)
+    for (const [src, tgt] of Object.entries(pairs)) {
+        if (src.trim().toLowerCase().includes(normalized) || normalized.includes(src.trim().toLowerCase())) return tgt;
+    }
+    return null;
+}
+
 // Initialize Office.js
 Office.onReady((info) => {
     if (info.host === Office.HostType.Word) {
@@ -166,8 +433,18 @@ Office.onReady((info) => {
             document.getElementById('apiKeySaved').style.display = 'inline-block';
         }
         
+        // Load saved Google Sheets URL
+        const savedSheetUrl = localStorage.getItem('google_sheet_url');
+        if (savedSheetUrl) {
+            document.getElementById('googleSheetUrl').value = savedSheetUrl;
+            document.getElementById('sheetSaved').style.display = 'inline-block';
+        }
+        
         // Load usage stats
         loadUsageStats();
+        
+        // Load translation memory system
+        loadMemorySystem();
         
         // Update model display
         updateCurrentModel();
@@ -194,6 +471,58 @@ function saveApiKey() {
     localStorage.setItem('openai_api_key', apiKey);
     document.getElementById('apiKeySaved').style.display = 'inline-block';
     showStatus('✅ API Key saved successfully', 'success');
+}
+
+// Save Google Sheet URL
+function saveGoogleSheetUrl() {
+    const sheetUrl = document.getElementById('googleSheetUrl').value.trim();
+    
+    if (!sheetUrl) {
+        localStorage.removeItem('google_sheet_url');
+        document.getElementById('sheetSaved').style.display = 'none';
+        showStatus('📊 Google Sheets logging disabled', 'info');
+        return;
+    }
+    
+    if (!sheetUrl.includes('script.google.com')) {
+        showStatus('⚠️ Please enter a valid Google Apps Script URL', 'error');
+        return;
+    }
+    
+    localStorage.setItem('google_sheet_url', sheetUrl);
+    document.getElementById('sheetSaved').style.display = 'inline-block';
+    showStatus('✅ Google Sheets connected! All translations will be logged.', 'success');
+}
+
+// Show Google Sheets setup instructions
+function showSheetInstructions() {
+    const instructions = `📊 Google Sheets Setup Guide:
+
+1. Create a new Google Sheet at sheets.google.com
+
+2. Add headers in Row 1:
+   Timestamp | Source Lang | Target Lang | Mode | Model | Words | Input Tokens | Output Tokens | Cost (USD) | Text Preview | User
+
+3. Go to Extensions → Apps Script
+
+4. Paste this code:
+   function doPost(e) {
+     const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+     const data = JSON.parse(e.postData.contents);
+     sheet.appendRow([new Date(), data.sourceLang, data.targetLang, data.mode, data.model, data.words, data.inputTokens, data.outputTokens, data.cost, data.textPreview, data.user]);
+     return ContentService.createTextOutput('OK');
+   }
+
+5. Deploy → New deployment → Web app
+   - Execute as: Me
+   - Who has access: Anyone
+   - Copy the deployment URL
+
+6. Paste the URL here and click Save Sheet URL!
+
+Done! All translations will log automatically 🎉`;
+    
+    alert(instructions);
 }
 
 // Main translation function
@@ -273,6 +602,26 @@ async function translateSingleParagraph(context, paragraph, sourceLang, targetLa
     };
     
     const wordCount = text.split(/\s+/).length;
+    
+    // Check translation memory cache first (exact match only)
+    const cached = lookupCache(text, sourceLang, targetLang);
+    if (cached) {
+        const model = document.getElementById('modelSelect').value;
+        paragraph.clear();
+        paragraph.insertText(cached, Word.InsertLocation.start);
+        await context.sync();
+        paragraph.font.name = originalFont.name;
+        paragraph.font.size = originalFont.size;
+        paragraph.font.bold = originalFont.bold;
+        paragraph.font.italic = originalFont.italic;
+        paragraph.font.underline = originalFont.underline;
+        paragraph.font.color = originalFont.color;
+        await context.sync();
+        recordCacheHit(model);
+        showStatus(`⚡ From memory: "${text.substring(0, 30)}..." → "${cached.substring(0, 30)}..."`, 'success');
+        return;
+    }
+    
     const result = await callChatGPT(text, sourceLang, targetLang, apiKey, model);
     
     // Clear and insert new text
@@ -291,6 +640,9 @@ async function translateSingleParagraph(context, paragraph, sourceLang, targetLa
     await context.sync();
     
     updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
+    
+    // Save to cache for future use
+    saveToCache(text, result.translation, sourceLang, targetLang);
     
     const detectedMsg = result.detectedLanguage ? ` (Detected: ${result.detectedLanguage})` : '';
     showStatus(`✅ Translation completed!${detectedMsg}`, 'success');
@@ -334,15 +686,16 @@ async function translateMultipleParagraphs(context, paragraphs, sourceLang, targ
     
     showStatus(`⏳ Translating ${paragraphsData.length} paragraphs...`, 'info');
     
-    // Translate all paragraphs at once
-    const allText = paragraphsData.map(p => p.text).join('\n\n');
-    const wordCount = allText.split(/\s+/).length;
+    // Use numbered markers to reliably split segments back after translation
+    // This avoids issues with ChatGPT not preserving exact \n\n separators (especially in tables)
+    const markedText = paragraphsData.map((p, i) => `[SEG:${i + 1}]\n${p.text}`).join('\n\n');
+    const wordCount = markedText.split(/\s+/).length;
     
     try {
-        const result = await callChatGPT(allText, sourceLang, targetLang, apiKey, model);
+        const result = await callChatGPT(markedText, sourceLang, targetLang, apiKey, model, true);
         
-        // Split translation back into paragraphs
-        const translations = result.translation.split('\n\n').filter(t => t.trim());
+        // Parse segments by markers [SEG:N]
+        const translations = parseSegments(result.translation, paragraphsData.length);
         
         // Apply translations back to paragraphs
         for (let i = 0; i < paragraphsData.length && i < translations.length; i++) {
@@ -376,14 +729,52 @@ async function translateMultipleParagraphs(context, paragraphs, sourceLang, targ
     }
 }
 
+// Parse numbered segment markers [SEG:N] from translation response
+function parseSegments(text, expectedCount) {
+    const results = [];
+    // Match each [SEG:N] marker and capture text until next marker or end
+    const regex = /\[SEG:(\d+)\]\s*([\s\S]*?)(?=\[SEG:\d+\]|$)/g;
+    let match;
+    const map = {};
+
+    while ((match = regex.exec(text)) !== null) {
+        const idx = parseInt(match[1]) - 1; // 0-based
+        map[idx] = match[2].trim();
+    }
+
+    for (let i = 0; i < expectedCount; i++) {
+        results.push(map[i] || ''); // fallback to empty if missing
+    }
+
+    // Fallback: if no markers found, split by \n\n like before
+    if (Object.keys(map).length === 0) {
+        const fallback = text.split('\n\n').filter(t => t.trim());
+        for (let i = 0; i < expectedCount; i++) {
+            results[i] = fallback[i] || results[i] || '';
+        }
+    }
+
+    return results;
+}
+
 // Call ChatGPT API
-async function callChatGPT(text, fromLang, toLang, apiKey, model) {
+async function callChatGPT(text, fromLang, toLang, apiKey, model, useSegmentMarkers = false) {
     const targetLanguage = LANGUAGE_MAP[toLang];
     const mode = document.getElementById('translationMode').value;
     const style = document.getElementById('translationStyle').value;
     
     // Build system prompt based on mode and style
     let systemPrompt = buildSystemPrompt(fromLang, toLang, targetLanguage, mode, style);
+    
+    // Lock numbers instruction
+    if (memorySettings.lockNumbers) {
+        systemPrompt += `\n\nCRITICAL - LOCK RULE: Never modify, translate, or alter any numbers, digits, dates, file IDs, reference numbers, phone numbers, or legal article numbers. Keep them exactly as they appear in the source text. Example: "المادة 15" → "Article 15" (not "Article fifteen").`;
+    }
+    
+    // When using segment markers, instruct the model to preserve them exactly
+    if (useSegmentMarkers) {
+        systemPrompt += `\n\nCRITICAL: The text contains segment markers like [SEG:1], [SEG:2], etc. You MUST preserve these markers EXACTLY in your output, each on its own line before its corresponding translated segment. Do NOT remove, renumber, or merge any markers.`;
+    }
     
     // Adjust temperature based on mode
     const temperature = getTemperatureForMode(mode, style);
@@ -474,10 +865,12 @@ function updateUsageStats(wordCount, usage, model, detectedLanguage) {
     
     // Calculate cost with safety check for pricing
     const pricing = MODEL_PRICING[model];
+    let currentCost = 0;
     if (pricing) {
         const inputCost = ((usage.prompt_tokens || 0) / 1000000) * pricing.input;
         const outputCost = ((usage.completion_tokens || 0) / 1000000) * pricing.output;
-        usageStats.totalCost += (inputCost + outputCost);
+        currentCost = inputCost + outputCost;
+        usageStats.totalCost += currentCost;
     } else {
         console.warn(`No pricing data for model: ${model}`);
     }
@@ -485,8 +878,51 @@ function updateUsageStats(wordCount, usage, model, detectedLanguage) {
     // Save to localStorage
     localStorage.setItem('usage_stats', JSON.stringify(usageStats));
     
+    const logEntry = {
+        sourceLang: document.getElementById('sourceLang')?.value || 'auto',
+        targetLang: document.getElementById('targetLang')?.value || 'ar',
+        mode: document.getElementById('translationMode')?.value || 'general',
+        model: model,
+        words: wordCount,
+        inputTokens: usage.prompt_tokens || 0,
+        outputTokens: usage.completion_tokens || 0,
+        cost: currentCost.toFixed(6)
+    };
+
+    // Log to server (persistent dashboard)
+    logToServer(logEntry);
+    syncToServer();
+
+    // Log to Google Sheets (if configured)
+    logToGoogleSheets({ ...logEntry, textPreview: '', user: localStorage.getItem('user_name') || 'Anonymous' });
+    
     // Update display
     displayUsageStats();
+}
+
+// Log translation data to Google Sheets
+async function logToGoogleSheets(data) {
+    const sheetUrl = localStorage.getItem('google_sheet_url');
+    
+    if (!sheetUrl) {
+        // Silently skip if not configured
+        return;
+    }
+    
+    try {
+        await fetch(sheetUrl, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        });
+        // Note: no-cors mode means we can't read the response, but that's ok
+        console.log('Logged to Google Sheets');
+    } catch (error) {
+        console.error('Failed to log to Google Sheets:', error);
+    }
 }
 
 // Load usage statistics
@@ -685,6 +1121,10 @@ You help with document translation, terminology, and language questions.
 You are working inside Microsoft Word as an add-in.
 When the user gives you context about a document (names, IDs, terminology), remember it for future translations.
 Be concise but helpful. If asked to translate text, provide the translation directly.
+IMPORTANT: When translating a list of terms or phrases, format each pair as:
+source text | translated text
+(one per line, pipe-separated) so the user can apply them directly to Word.
+${memorySettings.lockNumbers ? 'CRITICAL: Never modify numbers, dates, IDs, or reference numbers.' : ''}
 Current translation settings: Mode = ${document.getElementById('translationMode')?.value || 'general'}, Style = ${document.getElementById('translationStyle')?.value || 'balanced'}.`
             },
             ...chatHistory
