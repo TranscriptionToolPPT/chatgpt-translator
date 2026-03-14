@@ -649,18 +649,35 @@ function showStatus(message, type) {
 // Chat history (memory)
 let chatHistory = [];
 
-// Translation mapping (to track what was sent vs what was translated)
-let lastTranslationMapping = {
-    originalText: '',
-    translatedText: '',
-    timestamp: null
-};
+// Sentence-by-sentence translation mapping
+let sentenceMappings = [];
+
+// Split text into sentences intelligently
+function splitIntoSentences(text) {
+    const sentences = [];
+    const lines = text.split('\n');
+    
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        
+        // Check if it's a title/header (all caps, short, no period at end)
+        if (trimmed === trimmed.toUpperCase() && trimmed.length < 100 && !trimmed.endsWith('.')) {
+            sentences.push(trimmed);
+            continue;
+        }
+        
+        // Split by sentence endings
+        const lineSentences = trimmed.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [trimmed];
+        sentences.push(...lineSentences.map(s => s.trim()).filter(s => s));
+    }
+    
+    return sentences.filter(s => s);
+}
 
 // Add message to chat UI
 function addChatBubble(role, text, includeApplyButton = false) {
     const container = document.getElementById('chatMessages');
-
-    // Remove welcome message on first message
     const welcome = container.querySelector('.chat-welcome');
     if (welcome) welcome.remove();
 
@@ -668,7 +685,7 @@ function addChatBubble(role, text, includeApplyButton = false) {
 
     if (role === 'user') {
         bubble.className = 'chat-bubble user';
-        bubble.textContent = text;
+        bubble.textContent = text.length > 200 ? text.substring(0, 200) + '...' : text;
     } else if (role === 'system-msg') {
         bubble.className = 'chat-bubble system-msg';
         bubble.textContent = text;
@@ -676,24 +693,27 @@ function addChatBubble(role, text, includeApplyButton = false) {
         bubble.className = 'chat-bubble assistant';
         let content = `<div class="bubble-label">🤖 Assistant</div>${text.replace(/\n/g, '<br>')}`;
         
-        // Add "Apply to Document" buttons if this is a translation
-        if (includeApplyButton && lastTranslationMapping.originalText) {
-            content += `<div style="margin-top:10px; display:flex; gap:6px;">
-                <button onclick="applyTranslationToDocument(false)" style="
+        if (includeApplyButton && sentenceMappings.length > 0) {
+            const count = sentenceMappings.length;
+            content += `<div style="margin-top:10px; padding:8px; background:#f0f8ff; border-radius:6px; font-size:11px; color:#0056b3; border-left:3px solid #C9A961;">
+                📊 <strong>${count} sentence${count > 1 ? 's' : ''} mapped</strong> - Ready to replace!
+            </div>
+            <div style="margin-top:8px; display:flex; gap:6px;">
+                <button onclick="showMappingPreview()" style="
                     flex:1; padding:8px; border-radius:6px;
-                    background:linear-gradient(135deg, #C9A961 0%, #8B7355 100%);
-                    color:white; border:none; cursor:pointer; font-weight:600;
+                    background:#f8f9fa; border:1px solid #C9A961;
+                    color:#8B7355; cursor:pointer; font-weight:600;
                     font-size:11px; transition:all 0.2s;
-                " onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
-                    📄 Apply (First)
+                " onmouseover="this.style.background='#fff8e6'" onmouseout="this.style.background='#f8f9fa'">
+                    👁️ Preview (${count})
                 </button>
-                <button onclick="applyTranslationToDocument(true)" style="
-                    flex:1; padding:8px; border-radius:6px;
-                    background:linear-gradient(135deg, #17a2b8 0%, #138496 100%);
-                    color:white; border:none; cursor:pointer; font-weight:600;
+                <button onclick="applyAllTranslations()" style="
+                    flex:2; padding:8px; border-radius:6px;
+                    background:linear-gradient(135deg, #28a745 0%, #218838 100%);
+                    color:white; border:none; cursor:pointer; font-weight:700;
                     font-size:11px; transition:all 0.2s;
                 " onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
-                    🔄 Replace All
+                    🔄 Replace All ${count} Sentences
                 </button>
             </div>`;
         }
@@ -757,41 +777,28 @@ async function sendQuickMessage(action) {
             
             if (action === 'translate_selection') {
                 const targetLang = LANGUAGE_MAP[document.getElementById('targetLang').value];
-                const mode = document.getElementById('translationMode')?.value || 'general';
-                const style = document.getElementById('translationStyle')?.value || 'balanced';
+                const model = document.getElementById('modelSelect').value;
                 
-                // Build better prompt
-                let modeGuidance = '';
-                if (mode === 'legal') modeGuidance = 'This is a legal document. Use precise legal terminology.';
-                else if (mode === 'medical') modeGuidance = 'This is a medical document. Use accurate medical terminology.';
-                else if (mode === 'certificate') modeGuidance = 'This is an official certificate. Use formal language.';
-                else if (mode === 'bank') modeGuidance = 'This is a banking document. Use formal financial terminology.';
+                // Show user message
+                addChatBubble('user', `Translate ${selectedText.length > 100 ? selectedText.substring(0, 100) + '...' : selectedText}`);
                 
-                userMessage = `Translate the following text to ${targetLang}. ${modeGuidance}
-
-CRITICAL FORMATTING RULES (MUST FOLLOW EXACTLY):
-1. Return ONLY the pure translation - absolutely NO explanations, NO preamble, NO "Here is the translation", NO markdown
-2. Each line in the original MUST become exactly one line in the translation
-3. If original has 5 lines → translation MUST have exactly 5 lines
-4. Preserve ALL line breaks, paragraph breaks, and spacing EXACTLY
-5. Do NOT combine multiple lines into one line
-6. Do NOT split one line into multiple lines
-7. Keep ALL names, numbers, dates, IDs, and reference codes UNCHANGED
-8. Match the original structure line-by-line, word-for-word in position
-
-Original text:
-${selectedText}
-
-REMINDER: Return ONLY the translation with EXACT same line structure. No extra text!`;
+                showTyping();
                 
-                isTranslation = true;
+                try {
+                    // Use sentence-by-sentence translation
+                    const result = await translateSentenceBySentence(selectedText, targetLang, apiKey, model);
+                    
+                    hideTyping();
+                    
+                    // Show translation with apply button
+                    addChatBubble('assistant', result.translation, true);
+                    
+                } catch (error) {
+                    hideTyping();
+                    addChatBubble('system-msg', `❌ Translation error: ${error.message}`);
+                }
                 
-                // Save original text for mapping
-                lastTranslationMapping = {
-                    originalText: selectedText,
-                    translatedText: '', // Will be filled after translation
-                    timestamp: Date.now()
-                };
+                return; // Exit early for translation
             } else if (action === 'explain_selection') {
                 userMessage = `Please explain what this text means:\n\n"${selectedText}"`;
             } else if (action === 'improve_selection') {
@@ -932,11 +939,7 @@ Current style: ${document.getElementById('translationStyle')?.value || 'balanced
 // Clear chat history
 function clearChat() {
     chatHistory = [];
-    lastTranslationMapping = {
-        originalText: '',
-        translatedText: '',
-        timestamp: null
-    };
+    sentenceMappings = [];
     const container = document.getElementById('chatMessages');
     container.innerHTML = `
         <div class="chat-welcome">
@@ -1337,4 +1340,187 @@ function fileToBase64(file) {
         reader.onerror = reject;
         reader.readAsDataURL(file);
     });
+}
+
+// ===== SENTENCE-BY-SENTENCE TRANSLATION FUNCTIONS =====
+
+// Translate text sentence-by-sentence with mapping
+async function translateSentenceBySentence(originalText, targetLang, apiKey, model) {
+    // Split into sentences
+    const sentences = splitIntoSentences(originalText);
+    
+    if (sentences.length === 0) {
+        throw new Error('No sentences found to translate');
+    }
+    
+    addChatBubble('system-msg', `📊 Processing ${sentences.length} sentence${sentences.length > 1 ? 's' : ''}...`);
+    
+    // Clear previous mappings
+    sentenceMappings = [];
+    
+    // Build combined prompt for batch translation
+    let combinedPrompt = `Translate each of the following sentences to ${targetLang}. Return ONLY the translations, one per line, in the EXACT same order. Do NOT add numbers, labels, or explanations.\n\n`;
+    
+    sentences.forEach((sentence, i) => {
+        combinedPrompt += `${sentence}\n`;
+    });
+    
+    // Get translation from API
+    const mode = document.getElementById('translationMode')?.value || 'general';
+    const temperature = getTemperatureForMode(mode, 'balanced');
+    
+    const requestBody = {
+        model: model,
+        messages: [
+            {
+                role: 'system',
+                content: `You are a professional translator. Translate each sentence separately and return them in order, one per line. Do NOT add numbering or explanations. Keep names, numbers, and IDs unchanged.`
+            },
+            {
+                role: 'user',
+                content: combinedPrompt
+            }
+        ],
+        temperature: temperature
+    };
+    
+    if (model.includes('gpt-5') || model.includes('o1')) {
+        requestBody.max_completion_tokens = 3000;
+    } else {
+        requestBody.max_tokens = 3000;
+    }
+    
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(requestBody)
+    });
+    
+    if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error?.message || `HTTP Error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    const translatedText = data.content?.[0]?.text || data.choices?.[0]?.message?.content || '';
+    
+    // Split translations
+    const translations = translatedText.split('\n').filter(t => t.trim());
+    
+    // Create mappings
+    const minLength = Math.min(sentences.length, translations.length);
+    for (let i = 0; i < minLength; i++) {
+        sentenceMappings.push({
+            original: sentences[i].trim(),
+            translation: translations[i].trim()
+        });
+    }
+    
+    // Update usage stats
+    if (data.usage) {
+        updateUsageStats(
+            originalText.split(/\s+/).length,
+            data.usage,
+            model,
+            null
+        );
+    }
+    
+    // Return combined translation for display
+    return {
+        translation: translations.join('\n\n'),
+        sentenceCount: sentenceMappings.length
+    };
+}
+
+// Show mapping preview
+async function showMappingPreview() {
+    if (sentenceMappings.length === 0) {
+        addChatBubble('system-msg', '⚠️ No sentence mappings found.');
+        return;
+    }
+    
+    let preview = `📋 <strong>Translation Mapping Preview:</strong><br><br>`;
+    
+    const maxShow = Math.min(sentenceMappings.length, 5);
+    for (let i = 0; i < maxShow; i++) {
+        const mapping = sentenceMappings[i];
+        const origPreview = mapping.original.length > 80 ? mapping.original.substring(0, 80) + '...' : mapping.original;
+        const transPreview = mapping.translation.length > 80 ? mapping.translation.substring(0, 80) + '...' : mapping.translation;
+        
+        preview += `<div style="margin-bottom:10px; padding:6px; background:#fff; border-radius:4px; border-left:3px solid #C9A961;">
+            <div style="font-size:10px; color:#6c757d; margin-bottom:3px;">${i + 1}. Original:</div>
+            <div style="font-size:11px; color:#333;">${origPreview}</div>
+            <div style="font-size:10px; color:#6c757d; margin-top:6px; margin-bottom:3px;">Translation:</div>
+            <div style="font-size:11px; color:#0056b3;">${transPreview}</div>
+        </div>`;
+    }
+    
+    if (sentenceMappings.length > maxShow) {
+        preview += `<div style="font-size:10px; color:#6c757d; margin-top:6px;">...and ${sentenceMappings.length - maxShow} more sentence${sentenceMappings.length - maxShow > 1 ? 's' : ''}</div>`;
+    }
+    
+    addChatBubble('assistant', preview);
+}
+
+// Apply all sentence translations to document
+async function applyAllTranslations() {
+    if (sentenceMappings.length === 0) {
+        addChatBubble('system-msg', '⚠️ No translations to apply.');
+        return;
+    }
+    
+    addChatBubble('system-msg', `⏳ Replacing ${sentenceMappings.length} sentences...`);
+    
+    try {
+        await Word.run(async (context) => {
+            const body = context.document.body;
+            let replacedCount = 0;
+            let notFoundCount = 0;
+            
+            for (const mapping of sentenceMappings) {
+                try {
+                    const searchResults = body.search(mapping.original, {
+                        matchCase: false,
+                        matchWholeWord: false
+                    });
+                    
+                    searchResults.load('items');
+                    await context.sync();
+                    
+                    if (searchResults.items.length > 0) {
+                        // Replace all occurrences of this sentence
+                        for (const item of searchResults.items) {
+                            item.insertText(mapping.translation, Word.InsertLocation.replace);
+                        }
+                        replacedCount++;
+                    } else {
+                        notFoundCount++;
+                    }
+                } catch (e) {
+                    console.error(`Error replacing sentence: ${e.message}`);
+                    notFoundCount++;
+                }
+            }
+            
+            await context.sync();
+            
+            let resultMsg = `✅ Successfully replaced ${replacedCount} sentence${replacedCount > 1 ? 's' : ''}!`;
+            if (notFoundCount > 0) {
+                resultMsg += `\n⚠️ ${notFoundCount} sentence${notFoundCount > 1 ? 's were' : ' was'} not found (may have been modified).`;
+            }
+            
+            addChatBubble('system-msg', resultMsg);
+            
+            // Clear mappings after successful apply
+            sentenceMappings = [];
+            
+        });
+    } catch (error) {
+        console.error('Replace all error:', error);
+        addChatBubble('system-msg', `❌ Error: ${error.message}`);
+    }
 }
