@@ -154,286 +154,6 @@ let usageStats = {
     totalCost: 0
 };
 
-// Sync all data to server (so dashboard always has latest)
-async function syncToServer() {
-    try {
-        await fetch('http://localhost:3000/api/stats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                usageStats,
-                cacheStats,
-                translationCache
-            })
-        });
-    } catch(e) {
-        // Server might not be running, silently ignore
-    }
-}
-
-// Log a single translation to server
-async function logToServer(logData) {
-    try {
-        await fetch('http://localhost:3000/api/log', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(logData)
-        });
-    } catch(e) {}
-}
-
-// Settings with defaults
-let memorySettings = {
-    useCache: true,
-    replaceAll: false,
-    lockNumbers: true
-};
-
-// In-memory cache object (synced with localStorage)
-let translationCache = {};
-let cacheStats = { hits: 0, savedCost: 0 };
-
-function loadMemorySystem() {
-    // Load settings
-    const savedSettings = localStorage.getItem('memory_settings');
-    if (savedSettings) {
-        memorySettings = { ...memorySettings, ...JSON.parse(savedSettings) };
-    }
-    // Load cache
-    const savedCache = localStorage.getItem('translation_cache');
-    if (savedCache) {
-        translationCache = JSON.parse(savedCache);
-    }
-    // Load cache stats
-    const savedCacheStats = localStorage.getItem('cache_stats');
-    if (savedCacheStats) {
-        cacheStats = JSON.parse(savedCacheStats);
-    }
-    // Sync toggles UI
-    syncToggleUI();
-    updateCacheDisplay();
-}
-
-function syncToggleUI() {
-    ['useCache', 'replaceAll', 'lockNumbers'].forEach(key => {
-        const el = document.getElementById('toggle' + key.charAt(0).toUpperCase() + key.slice(1));
-        if (el) {
-            el.classList.toggle('on', !!memorySettings[key]);
-        }
-    });
-}
-
-function toggleSetting(key) {
-    memorySettings[key] = !memorySettings[key];
-    syncToggleUI();
-    localStorage.setItem('memory_settings', JSON.stringify(memorySettings));
-    showStatus(`${key === 'useCache' ? '🧠 Memory' : key === 'replaceAll' ? '🔄 Replace All' : '🔒 Lock Numbers'}: ${memorySettings[key] ? 'ON' : 'OFF'}`, 'info');
-}
-
-// Build cache key
-function cacheKey(text, fromLang, toLang) {
-    return `${fromLang}_${toLang}_${text.trim()}`;
-}
-
-// Lookup exact match in cache
-function lookupCache(text, fromLang, toLang) {
-    if (!memorySettings.useCache) return null;
-    const key = cacheKey(text, fromLang, toLang);
-    return translationCache[key] || null;
-}
-
-// Save to cache
-function saveToCache(sourceText, translatedText, fromLang, toLang) {
-    const key = cacheKey(sourceText, fromLang, toLang);
-    translationCache[key] = translatedText;
-    localStorage.setItem('translation_cache', JSON.stringify(translationCache));
-    updateCacheDisplay();
-    syncToServer();
-}
-
-// Save multiple pairs from chat mapping: { source: translation, ... }
-function savePairsToCache(pairs, fromLang, toLang) {
-    Object.entries(pairs).forEach(([src, tgt]) => {
-        if (src.trim() && tgt.trim()) {
-            translationCache[cacheKey(src, fromLang, toLang)] = tgt.trim();
-        }
-    });
-    localStorage.setItem('translation_cache', JSON.stringify(translationCache));
-    updateCacheDisplay();
-    syncToServer();
-}
-function recordCacheHit(model) {
-    cacheStats.hits++;
-    // Estimate cost saved: ~50 tokens per phrase at gpt-4.1 pricing
-    const pricing = MODEL_PRICING[model] || MODEL_PRICING['gpt-4.1'];
-    cacheStats.savedCost += (50 / 1000000) * pricing.input + (50 / 1000000) * pricing.output;
-    localStorage.setItem('cache_stats', JSON.stringify(cacheStats));
-    updateCacheDisplay();
-    syncToServer();
-}
-function clearCache() {
-    if (!confirm('Clear all saved translation pairs?')) return;
-    translationCache = {};
-    cacheStats = { hits: 0, savedCost: 0 };
-    localStorage.removeItem('translation_cache');
-    localStorage.removeItem('cache_stats');
-    updateCacheDisplay();
-    showStatus('🗑️ Translation memory cleared', 'info');
-    const preview = document.getElementById('cachePreview');
-    if (preview) { preview.innerHTML = ''; preview.style.display = 'none'; }
-}
-
-// Update cache display in UI
-function updateCacheDisplay() {
-    const count = Object.keys(translationCache).length;
-    const countEl = document.getElementById('cacheCount');
-    const hitsEl = document.getElementById('cacheHits');
-    const savedEl = document.getElementById('cacheSaved');
-    if (countEl) countEl.textContent = count.toLocaleString();
-    if (hitsEl) hitsEl.textContent = cacheStats.hits.toLocaleString();
-    if (savedEl) savedEl.textContent = `$${(cacheStats.savedCost || 0).toFixed(4)}`;
-}
-
-// Toggle cache preview panel
-function toggleCachePreview() {
-    const preview = document.getElementById('cachePreview');
-    if (preview.style.display === 'block') {
-        preview.style.display = 'none';
-        return;
-    }
-    const entries = Object.entries(translationCache);
-    if (entries.length === 0) {
-        preview.innerHTML = '<div style="color:#999; text-align:center; padding:8px;">No saved pairs yet</div>';
-    } else {
-        // Show last 20 entries
-        const html = entries.slice(-20).map(([key, val]) => {
-            const parts = key.split('_');
-            const src = parts.slice(2).join('_'); // everything after lang codes
-            return `<div class="cache-entry">${src}<span class="cache-arrow">→</span>${val}</div>`;
-        }).join('');
-        preview.innerHTML = html + (entries.length > 20 ? `<div style="color:#999; font-size:10px; text-align:center; padding:4px;">...and ${entries.length - 20} more</div>` : '');
-    }
-    preview.style.display = 'block';
-}
-
-// ===== APPLY CHAT → WORD =====
-// Parse the last assistant chat message for source|translation pairs
-// then replace the selected text (or all occurrences) in Word.
-async function applyChatToWord() {
-    const apiKey = localStorage.getItem('openai_api_key');
-
-    // Find last assistant message content
-    const lastAssistant = [...chatHistory].reverse().find(m => m.role === 'assistant');
-    if (!lastAssistant) {
-        showStatus('❌ No chat response to apply. Ask the assistant to translate first.', 'error');
-        return;
-    }
-
-    // Parse pipe-separated pairs: "source | translation"
-    const pairs = parseChatPairs(lastAssistant.content);
-    const hasPairs = Object.keys(pairs).length > 0;
-
-    // If no pairs found → treat entire chat response as direct translation for selected text
-    if (!hasPairs) {
-        try {
-            await Word.run(async (context) => {
-                const range = context.document.getSelection();
-                range.load("text");
-                await context.sync();
-                if (!range.text.trim()) { showStatus("⚠️ No text selected in Word", "error"); return; }
-                range.insertText(lastAssistant.content.trim(), Word.InsertLocation.replace);
-                await context.sync();
-                showStatus("✅ Applied chat response to selection", "success");
-            });
-        } catch(err) { showStatus("❌ Error: " + err.message, "error"); }
-        return;
-    }
-
-    const sourceLang = document.getElementById('sourceLang').value;
-    const targetLang = document.getElementById('targetLang').value;
-    const model = document.getElementById('modelSelect').value;
-
-    // Save to cache first
-    savePairsToCache(pairs, sourceLang, targetLang);
-
-    try {
-        await Word.run(async (context) => {
-            if (memorySettings.replaceAll) {
-                // Replace ALL occurrences in the whole document
-                let replacedCount = 0;
-                for (const [src, tgt] of Object.entries(pairs)) {
-                    if (!src.trim()) continue;
-                    const searchResults = context.document.body.search(src.trim(), { matchCase: false, matchWholeWord: false });
-                    searchResults.load('items');
-                    await context.sync();
-                    for (const item of searchResults.items) {
-                        item.insertText(tgt, Word.InsertLocation.replace);
-                        replacedCount++;
-                    }
-                    await context.sync();
-                }
-                showStatus(`✅ Replaced ${replacedCount} occurrence(s) in document`, 'success');
-            } else {
-                // Replace selected text only
-                const range = context.document.getSelection();
-                range.load('text');
-                await context.sync();
-
-                const selectedText = range.text.trim();
-                if (!selectedText) {
-                    showStatus('⚠️ No text selected. Select text in Word first.', 'error');
-                    return;
-                }
-
-                // Find best match in pairs
-                const match = findBestPairMatch(selectedText, pairs);
-                if (match) {
-                    range.insertText(match, Word.InsertLocation.replace);
-                    await context.sync();
-                    recordCacheHit(model);
-                    showStatus(`✅ Applied: "${selectedText}" → "${match}"`, 'success');
-                } else {
-                    showStatus(`⚠️ No match found for "${selectedText}" in chat response`, 'error');
-                }
-            }
-        });
-    } catch (err) {
-        showStatus(`❌ Error: ${err.message}`, 'error');
-    }
-}
-
-// Parse "source | translation" lines from chat response
-function parseChatPairs(text) {
-    const pairs = {};
-    const lines = text.split('\n');
-    for (const line of lines) {
-        if (line.includes('|')) {
-            const parts = line.split('|');
-            if (parts.length >= 2) {
-                // Clean markdown bold/asterisks and extra spaces
-                const src = parts[0].replace(/\*\*/g, '').replace(/^[-•\s]+/, '').trim();
-                const tgt = parts[1].replace(/\*\*/g, '').trim();
-                if (src && tgt) pairs[src] = tgt;
-            }
-        }
-    }
-    return pairs;
-}
-
-// Find exact or close match for selected text in pairs
-function findBestPairMatch(selectedText, pairs) {
-    const normalized = selectedText.trim().toLowerCase();
-    // 1. Exact match
-    for (const [src, tgt] of Object.entries(pairs)) {
-        if (src.trim().toLowerCase() === normalized) return tgt;
-    }
-    // 2. Contains match (selected text is inside a source key)
-    for (const [src, tgt] of Object.entries(pairs)) {
-        if (src.trim().toLowerCase().includes(normalized) || normalized.includes(src.trim().toLowerCase())) return tgt;
-    }
-    return null;
-}
-
 // Initialize Office.js
 Office.onReady((info) => {
     if (info.host === Office.HostType.Word) {
@@ -455,9 +175,6 @@ Office.onReady((info) => {
         
         // Load usage stats
         loadUsageStats();
-        
-        // Load translation memory system
-        loadMemorySystem();
         
         // Update model display
         updateCurrentModel();
@@ -615,26 +332,6 @@ async function translateSingleParagraph(context, paragraph, sourceLang, targetLa
     };
     
     const wordCount = text.split(/\s+/).length;
-    
-    // Check translation memory cache first (exact match only)
-    const cached = lookupCache(text, sourceLang, targetLang);
-    if (cached) {
-        const model = document.getElementById('modelSelect').value;
-        paragraph.clear();
-        paragraph.insertText(cached, Word.InsertLocation.start);
-        await context.sync();
-        paragraph.font.name = originalFont.name;
-        paragraph.font.size = originalFont.size;
-        paragraph.font.bold = originalFont.bold;
-        paragraph.font.italic = originalFont.italic;
-        paragraph.font.underline = originalFont.underline;
-        paragraph.font.color = originalFont.color;
-        await context.sync();
-        recordCacheHit(model);
-        showStatus(`⚡ From memory: "${text.substring(0, 30)}..." → "${cached.substring(0, 30)}..."`, 'success');
-        return;
-    }
-    
     const result = await callChatGPT(text, sourceLang, targetLang, apiKey, model);
     
     // Clear and insert new text
@@ -653,9 +350,6 @@ async function translateSingleParagraph(context, paragraph, sourceLang, targetLa
     await context.sync();
     
     updateUsageStats(wordCount, result.usage, model, result.detectedLanguage);
-    
-    // Save to cache for future use
-    saveToCache(text, result.translation, sourceLang, targetLang);
     
     const detectedMsg = result.detectedLanguage ? ` (Detected: ${result.detectedLanguage})` : '';
     showStatus(`✅ Translation completed!${detectedMsg}`, 'success');
@@ -699,16 +393,15 @@ async function translateMultipleParagraphs(context, paragraphs, sourceLang, targ
     
     showStatus(`⏳ Translating ${paragraphsData.length} paragraphs...`, 'info');
     
-    // Use numbered markers to reliably split segments back after translation
-    // This avoids issues with ChatGPT not preserving exact \n\n separators (especially in tables)
-    const markedText = paragraphsData.map((p, i) => `[SEG:${i + 1}]\n${p.text}`).join('\n\n');
-    const wordCount = markedText.split(/\s+/).length;
+    // Translate all paragraphs at once
+    const allText = paragraphsData.map(p => p.text).join('\n\n');
+    const wordCount = allText.split(/\s+/).length;
     
     try {
-        const result = await callChatGPT(markedText, sourceLang, targetLang, apiKey, model, true);
+        const result = await callChatGPT(allText, sourceLang, targetLang, apiKey, model);
         
-        // Parse segments by markers [SEG:N]
-        const translations = parseSegments(result.translation, paragraphsData.length);
+        // Split translation back into paragraphs
+        const translations = result.translation.split('\n\n').filter(t => t.trim());
         
         // Apply translations back to paragraphs
         for (let i = 0; i < paragraphsData.length && i < translations.length; i++) {
@@ -742,52 +435,14 @@ async function translateMultipleParagraphs(context, paragraphs, sourceLang, targ
     }
 }
 
-// Parse numbered segment markers [SEG:N] from translation response
-function parseSegments(text, expectedCount) {
-    const results = [];
-    // Match each [SEG:N] marker and capture text until next marker or end
-    const regex = /\[SEG:(\d+)\]\s*([\s\S]*?)(?=\[SEG:\d+\]|$)/g;
-    let match;
-    const map = {};
-
-    while ((match = regex.exec(text)) !== null) {
-        const idx = parseInt(match[1]) - 1; // 0-based
-        map[idx] = match[2].trim();
-    }
-
-    for (let i = 0; i < expectedCount; i++) {
-        results.push(map[i] || ''); // fallback to empty if missing
-    }
-
-    // Fallback: if no markers found, split by \n\n like before
-    if (Object.keys(map).length === 0) {
-        const fallback = text.split('\n\n').filter(t => t.trim());
-        for (let i = 0; i < expectedCount; i++) {
-            results[i] = fallback[i] || results[i] || '';
-        }
-    }
-
-    return results;
-}
-
 // Call ChatGPT API
-async function callChatGPT(text, fromLang, toLang, apiKey, model, useSegmentMarkers = false) {
+async function callChatGPT(text, fromLang, toLang, apiKey, model) {
     const targetLanguage = LANGUAGE_MAP[toLang];
     const mode = document.getElementById('translationMode').value;
     const style = document.getElementById('translationStyle').value;
     
     // Build system prompt based on mode and style
     let systemPrompt = buildSystemPrompt(fromLang, toLang, targetLanguage, mode, style);
-    
-    // Lock numbers instruction
-    if (memorySettings.lockNumbers) {
-        systemPrompt += `\n\nCRITICAL - LOCK RULE: Never modify, translate, or alter any numbers, digits, dates, file IDs, reference numbers, phone numbers, or legal article numbers. Keep them exactly as they appear in the source text. Example: "المادة 15" → "Article 15" (not "Article fifteen").`;
-    }
-    
-    // When using segment markers, instruct the model to preserve them exactly
-    if (useSegmentMarkers) {
-        systemPrompt += `\n\nCRITICAL: The text contains segment markers like [SEG:1], [SEG:2], etc. You MUST preserve these markers EXACTLY in your output, each on its own line before its corresponding translated segment. Do NOT remove, renumber, or merge any markers.`;
-    }
     
     // Adjust temperature based on mode
     const temperature = getTemperatureForMode(mode, style);
@@ -891,7 +546,8 @@ function updateUsageStats(wordCount, usage, model, detectedLanguage) {
     // Save to localStorage
     localStorage.setItem('usage_stats', JSON.stringify(usageStats));
     
-    const logEntry = {
+    // Log to Google Sheets (if configured)
+    logToGoogleSheets({
         sourceLang: document.getElementById('sourceLang')?.value || 'auto',
         targetLang: document.getElementById('targetLang')?.value || 'ar',
         mode: document.getElementById('translationMode')?.value || 'general',
@@ -899,15 +555,10 @@ function updateUsageStats(wordCount, usage, model, detectedLanguage) {
         words: wordCount,
         inputTokens: usage.prompt_tokens || 0,
         outputTokens: usage.completion_tokens || 0,
-        cost: currentCost.toFixed(6)
-    };
-
-    // Log to server (persistent dashboard)
-    logToServer(logEntry);
-    syncToServer();
-
-    // Log to Google Sheets (if configured)
-    logToGoogleSheets({ ...logEntry, textPreview: '', user: localStorage.getItem('user_name') || 'Anonymous' });
+        cost: currentCost.toFixed(6),
+        textPreview: '', // Will be added later if needed
+        user: localStorage.getItem('user_name') || 'Anonymous'
+    });
     
     // Update display
     displayUsageStats();
@@ -998,8 +649,15 @@ function showStatus(message, type) {
 // Chat history (memory)
 let chatHistory = [];
 
+// Translation mapping (to track what was sent vs what was translated)
+let lastTranslationMapping = {
+    originalText: '',
+    translatedText: '',
+    timestamp: null
+};
+
 // Add message to chat UI
-function addChatBubble(role, text) {
+function addChatBubble(role, text, includeApplyButton = false) {
     const container = document.getElementById('chatMessages');
 
     // Remove welcome message on first message
@@ -1016,7 +674,31 @@ function addChatBubble(role, text) {
         bubble.textContent = text;
     } else {
         bubble.className = 'chat-bubble assistant';
-        bubble.innerHTML = `<div class="bubble-label">🤖 Assistant</div>${text.replace(/\n/g, '<br>')}`;
+        let content = `<div class="bubble-label">🤖 Assistant</div>${text.replace(/\n/g, '<br>')}`;
+        
+        // Add "Apply to Document" buttons if this is a translation
+        if (includeApplyButton && lastTranslationMapping.originalText) {
+            content += `<div style="margin-top:10px; display:flex; gap:6px;">
+                <button onclick="applyTranslationToDocument(false)" style="
+                    flex:1; padding:8px; border-radius:6px;
+                    background:linear-gradient(135deg, #C9A961 0%, #8B7355 100%);
+                    color:white; border:none; cursor:pointer; font-weight:600;
+                    font-size:11px; transition:all 0.2s;
+                " onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+                    📄 Apply (First)
+                </button>
+                <button onclick="applyTranslationToDocument(true)" style="
+                    flex:1; padding:8px; border-radius:6px;
+                    background:linear-gradient(135deg, #17a2b8 0%, #138496 100%);
+                    color:white; border:none; cursor:pointer; font-weight:600;
+                    font-size:11px; transition:all 0.2s;
+                " onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+                    🔄 Replace All
+                </button>
+            </div>`;
+        }
+        
+        bubble.innerHTML = content;
     }
 
     container.appendChild(bubble);
@@ -1071,22 +753,58 @@ async function sendQuickMessage(action) {
             }
 
             let userMessage = '';
+            let isTranslation = false;
+            
             if (action === 'translate_selection') {
                 const targetLang = LANGUAGE_MAP[document.getElementById('targetLang').value];
-                userMessage = `Please translate this text to ${targetLang}:\n\n"${selectedText}"`;
+                const mode = document.getElementById('translationMode')?.value || 'general';
+                const style = document.getElementById('translationStyle')?.value || 'balanced';
+                
+                // Build better prompt
+                let modeGuidance = '';
+                if (mode === 'legal') modeGuidance = 'This is a legal document. Use precise legal terminology.';
+                else if (mode === 'medical') modeGuidance = 'This is a medical document. Use accurate medical terminology.';
+                else if (mode === 'certificate') modeGuidance = 'This is an official certificate. Use formal language.';
+                else if (mode === 'bank') modeGuidance = 'This is a banking document. Use formal financial terminology.';
+                
+                userMessage = `Translate the following text to ${targetLang}. ${modeGuidance}
+
+CRITICAL FORMATTING RULES (MUST FOLLOW EXACTLY):
+1. Return ONLY the pure translation - absolutely NO explanations, NO preamble, NO "Here is the translation", NO markdown
+2. Each line in the original MUST become exactly one line in the translation
+3. If original has 5 lines → translation MUST have exactly 5 lines
+4. Preserve ALL line breaks, paragraph breaks, and spacing EXACTLY
+5. Do NOT combine multiple lines into one line
+6. Do NOT split one line into multiple lines
+7. Keep ALL names, numbers, dates, IDs, and reference codes UNCHANGED
+8. Match the original structure line-by-line, word-for-word in position
+
+Original text:
+${selectedText}
+
+REMINDER: Return ONLY the translation with EXACT same line structure. No extra text!`;
+                
+                isTranslation = true;
+                
+                // Save original text for mapping
+                lastTranslationMapping = {
+                    originalText: selectedText,
+                    translatedText: '', // Will be filled after translation
+                    timestamp: Date.now()
+                };
             } else if (action === 'explain_selection') {
                 userMessage = `Please explain what this text means:\n\n"${selectedText}"`;
             } else if (action === 'improve_selection') {
                 userMessage = `Please improve and refine this text:\n\n"${selectedText}"`;
             }
 
-            await processChatMessage(userMessage, apiKey);
+            await processChatMessage(userMessage, apiKey, isTranslation);
         });
     } catch (e) {
         addChatBubble('system-msg', '⚠️ Could not read selection from document.');
         const apiKey = localStorage.getItem('openai_api_key');
         if (action === 'translate_selection') {
-            await processChatMessage('Please help me translate some text.', apiKey);
+            await processChatMessage('Please help me translate some text.', apiKey, false);
         }
     }
 }
@@ -1111,7 +829,7 @@ async function sendChatMessage() {
 }
 
 // Process and send chat message to API
-async function processChatMessage(userMessage, apiKey) {
+async function processChatMessage(userMessage, apiKey, isTranslation = false) {
     const sendBtn = document.getElementById('sendBtn');
     sendBtn.disabled = true;
 
@@ -1129,19 +847,26 @@ async function processChatMessage(userMessage, apiKey) {
         const messages = [
             {
                 role: 'system',
-                content: `You are an expert translation assistant for Dar Al Marjaan Translation Services. 
-You help with document translation, terminology, and language questions.
-You are working inside Microsoft Word as an add-in.
-When the user gives you context about a document (names, IDs, terminology), remember it for future translations.
-Be concise but helpful. If asked to translate text, provide the translation directly.
-IMPORTANT: When translating a list of terms or phrases, format each pair as:
-source text | translated text
-(one per line, pipe-separated) so the user can apply them directly to Word.
-${memorySettings.lockNumbers ? 'CRITICAL: Never modify numbers, dates, IDs, or reference numbers.' : ''}
-Current translation settings: Mode = ${document.getElementById('translationMode')?.value || 'general'}, Style = ${document.getElementById('translationStyle')?.value || 'balanced'}.`
+                content: `You are an expert translation assistant for Dar Al Marjaan Translation Services.
+
+CORE RULES FOR TRANSLATIONS:
+- Return ONLY the translated text - no introductions, no "Here is...", no explanations
+- PRESERVE the exact line break structure of the original
+- If the original has 5 separate lines, your translation MUST have 5 separate lines
+- Never merge multiple paragraphs into one
+- Keep all names, numbers, dates, and IDs unchanged
+- Match the formality level of the original
+
+CONTEXT MEMORY:
+- Remember any names, terminology, or context the user provides
+- Apply this context to all future translations in this session
+
+Current translation mode: ${document.getElementById('translationMode')?.value || 'general'}
+Current style: ${document.getElementById('translationStyle')?.value || 'balanced'}`
             },
             ...chatHistory
         ];
+
 
         // Prepare request
         const requestBody = {
@@ -1173,11 +898,21 @@ Current translation settings: Mode = ${document.getElementById('translationMode'
         }
 
         const data = await response.json();
-        const assistantMessage = data.content?.[0]?.text || data.choices?.[0]?.message?.content || 'No response received.';
+        let assistantMessage = data.content?.[0]?.text || data.choices?.[0]?.message?.content || 'No response received.';
+
+        // If this is a translation, clean up the response
+        if (isTranslation) {
+            // Remove quotes if present
+            assistantMessage = assistantMessage.replace(/^["']|["']$/g, '').trim();
+            
+            // Save the translation for Apply button
+            lastTranslationMapping.translatedText = assistantMessage;
+            lastTranslationMapping.timestamp = Date.now();
+        }
 
         // Add to history and UI
         chatHistory.push({ role: 'assistant', content: assistantMessage });
-        addChatBubble('assistant', assistantMessage);
+        addChatBubble('assistant', assistantMessage, isTranslation);
 
         // Keep history manageable (last 20 messages)
         if (chatHistory.length > 20) {
@@ -1197,6 +932,11 @@ Current translation settings: Mode = ${document.getElementById('translationMode'
 // Clear chat history
 function clearChat() {
     chatHistory = [];
+    lastTranslationMapping = {
+        originalText: '',
+        translatedText: '',
+        timestamp: null
+    };
     const container = document.getElementById('chatMessages');
     container.innerHTML = `
         <div class="chat-welcome">
@@ -1205,6 +945,103 @@ function clearChat() {
             <div style="margin-top:6px;">Ask me anything about your document, give me context about your project, or request a translation!</div>
         </div>
     `;
+}
+
+// Apply translation from chat to Word document
+async function applyTranslationToDocument(replaceAll = false) {
+    if (!lastTranslationMapping.originalText || !lastTranslationMapping.translatedText) {
+        addChatBubble('system-msg', '⚠️ No translation mapping found. Please translate text first.');
+        return;
+    }
+
+    try {
+        await Word.run(async (context) => {
+            const body = context.document.body;
+            
+            // Search for the original text
+            const searchResults = body.search(lastTranslationMapping.originalText, {
+                matchCase: false,
+                matchWholeWord: false
+            });
+            
+            searchResults.load('items');
+            await context.sync();
+
+            if (searchResults.items.length === 0) {
+                addChatBubble('system-msg', '⚠️ Original text not found in document. It may have been modified.');
+                return;
+            }
+
+            if (replaceAll) {
+                // Replace ALL occurrences
+                for (let i = 0; i < searchResults.items.length; i++) {
+                    searchResults.items[i].insertText(lastTranslationMapping.translatedText, Word.InsertLocation.replace);
+                }
+                await context.sync();
+                addChatBubble('system-msg', `✅ Replaced ${searchResults.items.length} occurrence${searchResults.items.length > 1 ? 's' : ''}!`);
+            } else {
+                // Replace first occurrence only
+                const firstResult = searchResults.items[0];
+                firstResult.insertText(lastTranslationMapping.translatedText, Word.InsertLocation.replace);
+                await context.sync();
+                addChatBubble('system-msg', `✅ Translation applied! (${searchResults.items.length > 1 ? searchResults.items.length - 1 + ' more occurrence(s) found' : 'only 1 occurrence'})`);
+            }
+
+            // Clear mapping after successful apply
+            lastTranslationMapping = {
+                originalText: '',
+                translatedText: '',
+                timestamp: null
+            };
+        });
+    } catch (error) {
+        console.error('Apply translation error:', error);
+        addChatBubble('system-msg', `❌ Error applying translation: ${error.message}`);
+    }
+}
+
+// Apply chat to Word (from any chat response)
+async function applyChatToWord() {
+    // Use existing mapping if available (from Translate button)
+    if (lastTranslationMapping.originalText && lastTranslationMapping.translatedText) {
+        await applyTranslationToDocument(false);
+        return;
+    }
+
+    // Otherwise, try to apply last assistant response to selection
+    if (chatHistory.length === 0) {
+        addChatBubble('system-msg', '⚠️ No chat history. Please chat with the assistant first!');
+        return;
+    }
+
+    const lastMessages = chatHistory.filter(m => m.role === 'assistant');
+    if (lastMessages.length === 0) {
+        addChatBubble('system-msg', '⚠️ No assistant response found.');
+        return;
+    }
+
+    const lastResponse = lastMessages[lastMessages.length - 1].content;
+
+    try {
+        await Word.run(async (context) => {
+            const range = context.document.getSelection();
+            range.load('text');
+            await context.sync();
+
+            if (!range.text || range.text.trim().length === 0) {
+                addChatBubble('system-msg', '⚠️ Please select text in Word first.');
+                return;
+            }
+
+            // Replace selection with last response
+            range.insertText(lastResponse.trim(), Word.InsertLocation.replace);
+            await context.sync();
+
+            addChatBubble('system-msg', '✅ Applied to Word successfully!');
+        });
+    } catch (error) {
+        addChatBubble('system-msg', `❌ Error: ${error.message}`);
+    }
 }
 
 // ===== FILE UPLOAD & IMAGE TRANSLATION =====
