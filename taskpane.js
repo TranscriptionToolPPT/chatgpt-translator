@@ -746,9 +746,19 @@ let chatHistory = [];
 
 // Sentence-by-sentence translation mapping
 let sentenceMappings = [];
+let originalFullText = ''; // Store original selected text
+let textDelimiter = '\n\n'; // Store delimiter type
 
 // Split text into sentences intelligently
+// Advanced sentence splitting that preserves structure (tabs, newlines, etc.)
 function splitIntoSentences(text) {
+    // Split by tabs first (for table cells)
+    if (text.includes('\t')) {
+        // This is likely table data - treat each tab-separated item as a separate sentence
+        return text.split('\t').map(s => s.trim()).filter(s => s);
+    }
+    
+    // Split by newlines for regular text
     const sentences = [];
     const lines = text.split('\n');
     
@@ -762,12 +772,26 @@ function splitIntoSentences(text) {
             continue;
         }
         
+        // Check if line is short (likely a header or table cell)
+        if (trimmed.length < 100 && !trimmed.includes('.') && !trimmed.includes(',')) {
+            sentences.push(trimmed);
+            continue;
+        }
+        
         // Split by sentence endings
         const lineSentences = trimmed.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [trimmed];
         sentences.push(...lineSentences.map(s => s.trim()).filter(s => s));
     }
     
     return sentences.filter(s => s);
+}
+
+// Detect delimiter type in original text
+function detectDelimiter(text) {
+    if (text.includes('\t')) return '\t';
+    if (text.includes('\n\n')) return '\n\n';
+    if (text.includes('\n')) return '\n';
+    return ' ';
 }
 
 // Add message to chat UI
@@ -1035,6 +1059,8 @@ Current style: ${document.getElementById('translationStyle')?.value || 'balanced
 function clearChat() {
     chatHistory = [];
     sentenceMappings = [];
+    originalFullText = '';
+    textDelimiter = '\n\n';
     const container = document.getElementById('chatMessages');
     container.innerHTML = `
         <div class="chat-welcome">
@@ -1452,6 +1478,9 @@ function calculateCost(usage, model) {
 
 // Translate text sentence-by-sentence with mapping
 async function translateSentenceBySentence(originalText, targetLang, apiKey, model) {
+    // Detect the delimiter used in original text
+    const delimiter = detectDelimiter(originalText);
+    
     // Split into sentences
     const sentences = splitIntoSentences(originalText);
     
@@ -1459,10 +1488,12 @@ async function translateSentenceBySentence(originalText, targetLang, apiKey, mod
         throw new Error('No sentences found to translate');
     }
     
-    addChatBubble('system-msg', `📊 Processing ${sentences.length} sentence${sentences.length > 1 ? 's' : ''}...`);
+    addChatBubble('system-msg', `📊 Processing ${sentences.length} item${sentences.length > 1 ? 's' : ''}...`);
     
-    // Clear previous mappings
+    // Clear previous mappings and store original text
     sentenceMappings = [];
+    originalFullText = originalText;
+    textDelimiter = delimiter;
     
     // Check memory first if enabled
     const cachedSentences = [];
@@ -1506,10 +1537,10 @@ async function translateSentenceBySentence(originalText, targetLang, apiKey, mod
     
     // Translate uncached sentences if any
     if (uncachedSentences.length > 0) {
-        addChatBubble('system-msg', `🔄 Translating ${uncachedSentences.length} new sentence${uncachedSentences.length > 1 ? 's' : ''}...`);
+        addChatBubble('system-msg', `🔄 Translating ${uncachedSentences.length} new item${uncachedSentences.length > 1 ? 's' : ''}...`);
         
         // Build combined prompt for batch translation
-        let combinedPrompt = `Translate each of the following sentences to ${targetLang}. Return ONLY the translations, one per line, in the EXACT same order. Do NOT add numbers, labels, or explanations.\n\n`;
+        let combinedPrompt = `Translate each of the following items to ${targetLang}. Return ONLY the translations, one per line, in the EXACT same order. Do NOT add numbers, labels, or explanations.\n\n`;
         
         uncachedSentences.forEach(sentence => {
             combinedPrompt += `${sentence}\n`;
@@ -1524,7 +1555,7 @@ async function translateSentenceBySentence(originalText, targetLang, apiKey, mod
             messages: [
                 {
                     role: 'system',
-                    content: `You are a professional translator. Translate each sentence separately and return them in order, one per line. Do NOT add numbering or explanations. Keep names, numbers, and IDs unchanged.`
+                    content: `You are a professional translator. Translate each item separately and return them in order, one per line. Do NOT add numbering or explanations. Keep names, numbers, and IDs unchanged.`
                 },
                 {
                     role: 'user',
@@ -1591,10 +1622,11 @@ async function translateSentenceBySentence(originalText, targetLang, apiKey, mod
         }
     }
     
-    // Return combined translation for display
+    // Return combined translation using the SAME delimiter as original
     return {
-        translation: translations.filter(t => t).join('\n\n'),
-        sentenceCount: sentenceMappings.length
+        translation: translations.filter(t => t).join(delimiter),
+        sentenceCount: sentenceMappings.length,
+        delimiter: delimiter  // Store delimiter for later use
     };
 }
 
@@ -1635,50 +1667,49 @@ async function applyAllTranslations() {
         return;
     }
     
-    addChatBubble('system-msg', `⏳ Replacing ${sentenceMappings.length} sentences...`);
+    if (!originalFullText) {
+        addChatBubble('system-msg', '⚠️ Original text not found. Please translate again.');
+        return;
+    }
+    
+    addChatBubble('system-msg', `⏳ Building translated text from ${sentenceMappings.length} items...`);
     
     try {
         await Word.run(async (context) => {
+            // Build the translated text by joining translations with same delimiter
+            const translatedFullText = sentenceMappings.map(m => m.translation).join(textDelimiter);
+            
+            // Search for the original full text
             const body = context.document.body;
-            let replacedCount = 0;
-            let notFoundCount = 0;
+            const searchResults = body.search(originalFullText, {
+                matchCase: false,
+                matchWholeWord: false
+            });
             
-            for (const mapping of sentenceMappings) {
-                try {
-                    const searchResults = body.search(mapping.original, {
-                        matchCase: false,
-                        matchWholeWord: false
-                    });
-                    
-                    searchResults.load('items');
-                    await context.sync();
-                    
-                    if (searchResults.items.length > 0) {
-                        // Replace all occurrences of this sentence
-                        for (const item of searchResults.items) {
-                            item.insertText(mapping.translation, Word.InsertLocation.replace);
-                        }
-                        replacedCount++;
-                    } else {
-                        notFoundCount++;
-                    }
-                } catch (e) {
-                    console.error(`Error replacing sentence: ${e.message}`);
-                    notFoundCount++;
-                }
-            }
-            
+            searchResults.load('items');
             await context.sync();
             
-            let resultMsg = `✅ Successfully replaced ${replacedCount} sentence${replacedCount > 1 ? 's' : ''}!`;
-            if (notFoundCount > 0) {
-                resultMsg += `\n⚠️ ${notFoundCount} sentence${notFoundCount > 1 ? 's were' : ' was'} not found (may have been modified).`;
+            if (searchResults.items.length === 0) {
+                addChatBubble('system-msg', '⚠️ Original text not found in document. It may have been modified. Please select and translate again.');
+                return;
+            }
+            
+            // Replace the first occurrence (the selected region)
+            searchResults.items[0].insertText(translatedFullText, Word.InsertLocation.replace);
+            await context.sync();
+            
+            let resultMsg = `✅ Successfully replaced with ${sentenceMappings.length} translated item${sentenceMappings.length > 1 ? 's' : ''}!`;
+            
+            if (searchResults.items.length > 1) {
+                resultMsg += `\n📌 Note: Found ${searchResults.items.length - 1} other matching region${searchResults.items.length > 2 ? 's' : ''} but only replaced the first one.`;
             }
             
             addChatBubble('system-msg', resultMsg);
             
             // Clear mappings after successful apply
             sentenceMappings = [];
+            originalFullText = '';
+            textDelimiter = '\n\n';
             
         });
     } catch (error) {
