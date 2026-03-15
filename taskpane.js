@@ -1667,41 +1667,57 @@ async function applyAllTranslations() {
         return;
     }
     
-    if (!originalFullText) {
-        addChatBubble('system-msg', '⚠️ Original text not found. Please translate again.');
-        return;
-    }
-    
-    addChatBubble('system-msg', `⏳ Building translated text from ${sentenceMappings.length} items...`);
+    addChatBubble('system-msg', `⏳ Replacing ${sentenceMappings.length} items...`);
     
     try {
         await Word.run(async (context) => {
-            // Build the translated text by joining translations with same delimiter
-            const translatedFullText = sentenceMappings.map(m => m.translation).join(textDelimiter);
-            
-            // Search for the original full text
             const body = context.document.body;
-            const searchResults = body.search(originalFullText, {
-                matchCase: false,
-                matchWholeWord: false
-            });
+            let replacedCount = 0;
+            let notFoundCount = 0;
             
-            searchResults.load('items');
-            await context.sync();
-            
-            if (searchResults.items.length === 0) {
-                addChatBubble('system-msg', '⚠️ Original text not found in document. It may have been modified. Please select and translate again.');
-                return;
+            // Replace each sentence individually (avoids "too long" error)
+            for (const mapping of sentenceMappings) {
+                try {
+                    // Skip empty mappings
+                    if (!mapping.original || !mapping.translation) continue;
+                    
+                    // Search for this specific sentence
+                    const searchResults = body.search(mapping.original, {
+                        matchCase: false,
+                        matchWholeWord: false
+                    });
+                    
+                    searchResults.load('items');
+                    await context.sync();
+                    
+                    if (searchResults.items.length > 0) {
+                        // Check if "Replace All Similar" is enabled
+                        const replaceAllSimilar = settings.replaceAllSimilar || false;
+                        
+                        if (replaceAllSimilar) {
+                            // Replace all occurrences
+                            for (const item of searchResults.items) {
+                                item.insertText(mapping.translation, Word.InsertLocation.replace);
+                            }
+                        } else {
+                            // Replace only first occurrence
+                            searchResults.items[0].insertText(mapping.translation, Word.InsertLocation.replace);
+                        }
+                        replacedCount++;
+                    } else {
+                        notFoundCount++;
+                    }
+                } catch (e) {
+                    console.error(`Error replacing: ${e.message}`);
+                    notFoundCount++;
+                }
             }
             
-            // Replace the first occurrence (the selected region)
-            searchResults.items[0].insertText(translatedFullText, Word.InsertLocation.replace);
             await context.sync();
             
-            let resultMsg = `✅ Successfully replaced with ${sentenceMappings.length} translated item${sentenceMappings.length > 1 ? 's' : ''}!`;
-            
-            if (searchResults.items.length > 1) {
-                resultMsg += `\n📌 Note: Found ${searchResults.items.length - 1} other matching region${searchResults.items.length > 2 ? 's' : ''} but only replaced the first one.`;
+            let resultMsg = `✅ Successfully replaced ${replacedCount} item${replacedCount > 1 ? 's' : ''}!`;
+            if (notFoundCount > 0) {
+                resultMsg += `\n⚠️ ${notFoundCount} item${notFoundCount > 1 ? 's were' : ' was'} not found.`;
             }
             
             addChatBubble('system-msg', resultMsg);
@@ -1713,7 +1729,7 @@ async function applyAllTranslations() {
             
         });
     } catch (error) {
-        console.error('Replace all error:', error);
+        console.error('Replace error:', error);
         addChatBubble('system-msg', `❌ Error: ${error.message}`);
     }
 }
