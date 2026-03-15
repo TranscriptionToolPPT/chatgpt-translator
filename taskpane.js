@@ -154,6 +154,94 @@ let usageStats = {
     totalCost: 0
 };
 
+// Translation Memory
+let translationMemory = {};
+let memoryStats = {
+    savedPairs: 0,
+    cacheHits: 0,
+    costSaved: 0
+};
+
+// Settings
+let settings = {
+    useMemory: true,
+    replaceAllSimilar: false
+};
+
+// Load translation memory from localStorage
+function loadTranslationMemory() {
+    const saved = localStorage.getItem('translation_memory');
+    if (saved) {
+        try {
+            translationMemory = JSON.parse(saved);
+            memoryStats.savedPairs = Object.keys(translationMemory).length;
+        } catch (e) {
+            translationMemory = {};
+        }
+    }
+    
+    const savedStats = localStorage.getItem('memory_stats');
+    if (savedStats) {
+        try {
+            const stats = JSON.parse(savedStats);
+            memoryStats.cacheHits = stats.cacheHits || 0;
+            memoryStats.costSaved = stats.costSaved || 0;
+        } catch (e) {}
+    }
+    
+    const savedSettings = localStorage.getItem('translation_settings');
+    if (savedSettings) {
+        try {
+            const s = JSON.parse(savedSettings);
+            settings.useMemory = s.useMemory !== undefined ? s.useMemory : true;
+            settings.replaceAllSimilar = s.replaceAllSimilar || false;
+        } catch (e) {}
+    }
+    
+    displayMemoryStats();
+}
+
+// Display memory stats
+function displayMemoryStats() {
+    document.getElementById('savedPairs').textContent = memoryStats.savedPairs;
+    document.getElementById('cacheHits').textContent = memoryStats.cacheHits;
+    document.getElementById('costSaved').textContent = '$' + memoryStats.costSaved.toFixed(4);
+}
+
+// Toggle memory usage
+function toggleMemory() {
+    settings.useMemory = document.getElementById('useMemoryToggle').checked;
+    localStorage.setItem('translation_settings', JSON.stringify(settings));
+}
+
+// Toggle replace all similar
+function toggleReplaceAll() {
+    settings.replaceAllSimilar = document.getElementById('replaceAllToggle').checked;
+    localStorage.setItem('translation_settings', JSON.stringify(settings));
+}
+
+// Check translation memory
+function checkMemory(text, targetLang) {
+    if (!settings.useMemory) return null;
+    
+    const key = `${text}__${targetLang}`;
+    return translationMemory[key] || null;
+}
+
+// Save to translation memory
+function saveToMemory(originalText, translatedText, targetLang, cost) {
+    const key = `${originalText}__${targetLang}`;
+    translationMemory[key] = {
+        translation: translatedText,
+        timestamp: Date.now(),
+        cost: cost
+    };
+    
+    memoryStats.savedPairs = Object.keys(translationMemory).length;
+    localStorage.setItem('translation_memory', JSON.stringify(translationMemory));
+    displayMemoryStats();
+}
+
 // Initialize Office.js
 Office.onReady((info) => {
     if (info.host === Office.HostType.Word) {
