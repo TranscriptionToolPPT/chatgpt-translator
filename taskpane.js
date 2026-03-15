@@ -264,6 +264,13 @@ Office.onReady((info) => {
         // Load usage stats
         loadUsageStats();
         
+        // Load translation memory
+        loadTranslationMemory();
+        
+        // Set toggle states
+        document.getElementById('useMemoryToggle').checked = settings.useMemory;
+        document.getElementById('replaceAllToggle').checked = settings.replaceAllSimilar;
+        
         // Update model display
         updateCurrentModel();
         
@@ -1432,6 +1439,16 @@ function fileToBase64(file) {
 
 // ===== SENTENCE-BY-SENTENCE TRANSLATION FUNCTIONS =====
 
+// Calculate cost from usage
+function calculateCost(usage, model) {
+    if (!usage) return 0;
+    const pricing = MODEL_PRICING[model];
+    if (!pricing) return 0;
+    const inputCost = ((usage.prompt_tokens || 0) / 1000000) * pricing.input;
+    const outputCost = ((usage.completion_tokens || 0) / 1000000) * pricing.output;
+    return inputCost + outputCost;
+}
+
 // Translate text sentence-by-sentence with mapping
 async function translateSentenceBySentence(originalText, targetLang, apiKey, model) {
     // Split into sentences
@@ -1446,80 +1463,136 @@ async function translateSentenceBySentence(originalText, targetLang, apiKey, mod
     // Clear previous mappings
     sentenceMappings = [];
     
-    // Build combined prompt for batch translation
-    let combinedPrompt = `Translate each of the following sentences to ${targetLang}. Return ONLY the translations, one per line, in the EXACT same order. Do NOT add numbers, labels, or explanations.\n\n`;
+    // Check memory first if enabled
+    const cachedSentences = [];
+    const uncachedSentences = [];
+    const uncachedIndices = [];
     
     sentences.forEach((sentence, i) => {
-        combinedPrompt += `${sentence}\n`;
+        const trimmedSentence = sentence.trim();
+        const cached = checkMemory(trimmedSentence, targetLang);
+        if (cached) {
+            cachedSentences.push({ 
+                index: i, 
+                original: trimmedSentence, 
+                translation: cached.translation 
+            });
+            memoryStats.cacheHits++;
+            memoryStats.costSaved += cached.cost || 0.0001;
+        } else {
+            uncachedSentences.push(trimmedSentence);
+            uncachedIndices.push(i);
+        }
     });
     
-    // Get translation from API
-    const mode = document.getElementById('translationMode')?.value || 'general';
-    const temperature = getTemperatureForMode(mode, 'balanced');
-    
-    const requestBody = {
-        model: model,
-        messages: [
-            {
-                role: 'system',
-                content: `You are a professional translator. Translate each sentence separately and return them in order, one per line. Do NOT add numbering or explanations. Keep names, numbers, and IDs unchanged.`
-            },
-            {
-                role: 'user',
-                content: combinedPrompt
-            }
-        ],
-        temperature: temperature
-    };
-    
-    if (model.includes('gpt-5') || model.includes('o1')) {
-        requestBody.max_completion_tokens = 3000;
-    } else {
-        requestBody.max_tokens = 3000;
+    // Show memory stats if found cached items
+    if (cachedSentences.length > 0) {
+        addChatBubble('system-msg', `💾 Found ${cachedSentences.length} in memory (saved cost!)`);
+        localStorage.setItem('memory_stats', JSON.stringify(memoryStats));
+        displayMemoryStats();
     }
     
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(requestBody)
-    });
+    let translations = new Array(sentences.length);
     
-    if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error?.message || `HTTP Error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    const translatedText = data.content?.[0]?.text || data.choices?.[0]?.message?.content || '';
-    
-    // Split translations
-    const translations = translatedText.split('\n').filter(t => t.trim());
-    
-    // Create mappings
-    const minLength = Math.min(sentences.length, translations.length);
-    for (let i = 0; i < minLength; i++) {
-        sentenceMappings.push({
-            original: sentences[i].trim(),
-            translation: translations[i].trim()
+    // Fill cached translations into mappings
+    cachedSentences.forEach(item => {
+        translations[item.index] = item.translation;
+        sentenceMappings.push({ 
+            original: item.original, 
+            translation: item.translation 
         });
-    }
+    });
     
-    // Update usage stats
-    if (data.usage) {
-        updateUsageStats(
-            originalText.split(/\s+/).length,
-            data.usage,
-            model,
-            null
-        );
+    // Translate uncached sentences if any
+    if (uncachedSentences.length > 0) {
+        addChatBubble('system-msg', `🔄 Translating ${uncachedSentences.length} new sentence${uncachedSentences.length > 1 ? 's' : ''}...`);
+        
+        // Build combined prompt for batch translation
+        let combinedPrompt = `Translate each of the following sentences to ${targetLang}. Return ONLY the translations, one per line, in the EXACT same order. Do NOT add numbers, labels, or explanations.\n\n`;
+        
+        uncachedSentences.forEach(sentence => {
+            combinedPrompt += `${sentence}\n`;
+        });
+        
+        // Get translation from API
+        const mode = document.getElementById('translationMode')?.value || 'general';
+        const temperature = getTemperatureForMode(mode, 'balanced');
+        
+        const requestBody = {
+            model: model,
+            messages: [
+                {
+                    role: 'system',
+                    content: `You are a professional translator. Translate each sentence separately and return them in order, one per line. Do NOT add numbering or explanations. Keep names, numbers, and IDs unchanged.`
+                },
+                {
+                    role: 'user',
+                    content: combinedPrompt
+                }
+            ],
+            temperature: temperature
+        };
+        
+        if (model.includes('gpt-5') || model.includes('o1')) {
+            requestBody.max_completion_tokens = 3000;
+        } else {
+            requestBody.max_tokens = 3000;
+        }
+        
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(requestBody)
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error?.message || `HTTP Error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        const translatedText = data.content?.[0]?.text || data.choices?.[0]?.message?.content || '';
+        
+        // Split translations
+        const newTranslations = translatedText.split('\n').filter(t => t.trim());
+        
+        // Calculate cost per sentence
+        const totalCost = calculateCost(data.usage, model);
+        const costPerSentence = uncachedSentences.length > 0 ? totalCost / uncachedSentences.length : 0;
+        
+        // Fill uncached translations and save to memory
+        uncachedIndices.forEach((originalIndex, i) => {
+            if (i < newTranslations.length) {
+                const translation = newTranslations[i].trim();
+                translations[originalIndex] = translation;
+                
+                sentenceMappings.push({ 
+                    original: uncachedSentences[i], 
+                    translation: translation 
+                });
+                
+                // Save to memory
+                saveToMemory(uncachedSentences[i], translation, targetLang, costPerSentence);
+            }
+        });
+        
+        // Update usage stats
+        if (data.usage) {
+            updateUsageStats(
+                originalText.split(/\s+/).length,
+                data.usage,
+                model,
+                null
+            );
+        }
     }
     
     // Return combined translation for display
     return {
-        translation: translations.join('\n\n'),
+        translation: translations.filter(t => t).join('\n\n'),
         sentenceCount: sentenceMappings.length
     };
 }
