@@ -1100,9 +1100,10 @@ async function applyTranslationToDocument(replaceAll = false) {
 
 // Apply chat to Word (from any chat response)
 async function applyChatToWord() {
-    // Use existing mapping if available (from Translate button)
-    if (lastTranslationMapping.originalText && lastTranslationMapping.translatedText) {
-        await applyTranslationToDocument(false);
+    // Check if we have sentence mappings (from Translate button)
+    if (sentenceMappings.length > 0) {
+        addChatBubble('system-msg', `🔄 Applying ${sentenceMappings.length} sentence mappings...`);
+        await applyAllTranslations();
         return;
     }
 
@@ -1127,7 +1128,7 @@ async function applyChatToWord() {
             await context.sync();
 
             if (!range.text || range.text.trim().length === 0) {
-                addChatBubble('system-msg', '⚠️ Please select text in Word first.');
+                addChatBubble('system-msg', '⚠️ Please select text in Word first, then click Apply → Word.');
                 return;
             }
 
