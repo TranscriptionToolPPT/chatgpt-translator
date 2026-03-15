@@ -5,7 +5,7 @@
            xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
            xsi:type="TaskPaneApp">
   <Id>a1b2c3d4-5678-90ab-cdef-1234567890ab</Id>
-  <Version>2.4.0.0</Version>
+  <Version>2.6.0.0</Version>
   <ProviderName>Dar Al Marjaan Translation</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="ChatGPT Translator"/>
